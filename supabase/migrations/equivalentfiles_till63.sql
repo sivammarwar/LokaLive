@@ -4971,3 +4971,1567 @@ ADD COLUMN IF NOT EXISTS chess_room_id UUID REFERENCES rooms(id) ON DELETE SET N
 -- Add index for faster lookups
 CREATE INDEX IF NOT EXISTS idx_chess_games_chess_room_id 
 ON chess_games(chess_room_id);
+
+
+
+------ FILE - 60 
+
+-- ============================================
+-- 🔧 PRODUCTION-READY BET MATCH SYSTEM FIX
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+-- ============================================
+-- FIX #1: Add missing chess_room_id column (if not exists)
+-- ============================================
+ALTER TABLE chess_games 
+ADD COLUMN IF NOT EXISTS chess_room_id UUID REFERENCES rooms(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_chess_games_chess_room_id 
+ON chess_games(chess_room_id);
+
+-- ============================================
+-- FIX #2: Atomic Bet Deduction Function
+-- Prevents partial failures and race conditions
+-- ============================================
+DROP FUNCTION IF EXISTS deduct_bet_from_both_players(UUID, UUID, UUID, INTEGER);
+
+CREATE OR REPLACE FUNCTION deduct_bet_from_both_players(
+    p_game_id UUID,
+    p_player1_id UUID,
+    p_player2_id UUID,
+    p_bet_amount INTEGER
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_player1_diamonds INTEGER;
+    v_player2_diamonds INTEGER;
+    v_error_message TEXT;
+BEGIN
+    -- Lock both users to prevent race conditions
+    PERFORM * FROM users 
+    WHERE id IN (p_player1_id, p_player2_id) 
+    FOR UPDATE;
+    
+    -- Check player 1 balance
+    SELECT diamonds INTO v_player1_diamonds
+    FROM users WHERE id = p_player1_id;
+    
+    IF v_player1_diamonds IS NULL THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 1 not found'
+        );
+    END IF;
+    
+    IF v_player1_diamonds < p_bet_amount THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 1 has insufficient diamonds',
+            'player1_diamonds', v_player1_diamonds,
+            'required', p_bet_amount
+        );
+    END IF;
+    
+    -- Check player 2 balance
+    SELECT diamonds INTO v_player2_diamonds
+    FROM users WHERE id = p_player2_id;
+    
+    IF v_player2_diamonds IS NULL THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 2 not found'
+        );
+    END IF;
+    
+    IF v_player2_diamonds < p_bet_amount THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 2 has insufficient diamonds',
+            'player2_diamonds', v_player2_diamonds,
+            'required', p_bet_amount
+        );
+    END IF;
+    
+    -- ✅ ATOMIC DEDUCTION: Both or none
+    BEGIN
+        -- Deduct from player 1
+        UPDATE users 
+        SET diamonds = diamonds - p_bet_amount, updated_at = NOW()
+        WHERE id = p_player1_id;
+        
+        -- Deduct from player 2
+        UPDATE users 
+        SET diamonds = diamonds - p_bet_amount, updated_at = NOW()
+        WHERE id = p_player2_id;
+        
+        -- Record transactions
+        INSERT INTO diamond_transactions (user_id, type, amount, description, status)
+        VALUES 
+            (p_player1_id, 'bet_deduct', -p_bet_amount, 
+             'Chess bet locked: ' || p_bet_amount || ' diamonds (Game: ' || p_game_id || ')', 
+             'completed'),
+            (p_player2_id, 'bet_deduct', -p_bet_amount, 
+             'Chess bet locked: ' || p_bet_amount || ' diamonds (Game: ' || p_game_id || ')', 
+             'completed');
+        
+        -- Update game bet status
+        UPDATE chess_games
+        SET bet_status = 'locked', updated_at = NOW()
+        WHERE id = p_game_id;
+        
+        RAISE NOTICE '✅ Bet deducted successfully: % diamonds from both players', p_bet_amount;
+        
+        RETURN json_build_object(
+            'success', true,
+            'message', 'Bet locked successfully',
+            'player1_new_balance', v_player1_diamonds - p_bet_amount,
+            'player2_new_balance', v_player2_diamonds - p_bet_amount
+        );
+        
+    EXCEPTION WHEN OTHERS THEN
+        -- Automatic rollback on any error
+        v_error_message := SQLERRM;
+        RAISE WARNING '❌ Bet deduction failed: %', v_error_message;
+        
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Transaction failed: ' || v_error_message
+        );
+    END;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION deduct_bet_from_both_players(UUID, UUID, UUID, INTEGER) TO authenticated, anon;
+
+-- ============================================
+-- FIX #3: Enhanced Bet Payout with Validation
+-- ============================================
+DROP FUNCTION IF EXISTS process_bet_payout(UUID);
+
+CREATE OR REPLACE FUNCTION process_bet_payout(p_game_id UUID)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_game RECORD;
+    v_payout_amount INTEGER;
+    v_winner_balance INTEGER;
+BEGIN
+    -- Get game details with lock
+    SELECT * INTO v_game 
+    FROM chess_games 
+    WHERE id = p_game_id 
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Game not found');
+    END IF;
+    
+    -- Validate bet match
+    IF v_game.is_bet_match = false THEN
+        RETURN json_build_object('success', false, 'error', 'Not a bet match');
+    END IF;
+    
+    -- Check if already paid out
+    IF v_game.bet_status = 'paid_out' THEN
+        RETURN json_build_object('success', false, 'error', 'Already paid out');
+    END IF;
+    
+    -- Validate bet was locked
+    IF v_game.bet_status != 'locked' THEN
+        RETURN json_build_object('success', false, 'error', 'Bet was not locked');
+    END IF;
+    
+    -- Validate winner exists
+    IF v_game.winner_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'No winner declared');
+    END IF;
+    
+    -- Validate bet amount
+    IF v_game.bet_amount IS NULL OR v_game.bet_amount <= 0 THEN
+        RETURN json_build_object('success', false, 'error', 'Invalid bet amount');
+    END IF;
+    
+    -- Calculate payout (winner gets 2x bet)
+    v_payout_amount := v_game.bet_amount * 2;
+    
+    -- Award diamonds to winner
+    UPDATE users
+    SET diamonds = diamonds + v_payout_amount, updated_at = NOW()
+    WHERE id = v_game.winner_id
+    RETURNING diamonds INTO v_winner_balance;
+    
+    -- Record transaction
+    INSERT INTO diamond_transactions (user_id, type, amount, description, status)
+    VALUES (
+        v_game.winner_id, 
+        'bet_win', 
+        v_payout_amount, 
+        'Won chess bet: ' || v_payout_amount || ' diamonds (Game: ' || p_game_id || ')', 
+        'completed'
+    );
+    
+    -- Mark as paid out
+    UPDATE chess_games
+    SET bet_status = 'paid_out', updated_at = NOW()
+    WHERE id = p_game_id;
+    
+    RAISE NOTICE '✅ Paid out % diamonds to winner %', v_payout_amount, v_game.winner_id;
+    
+    RETURN json_build_object(
+        'success', true,
+        'winner_id', v_game.winner_id,
+        'payout_amount', v_payout_amount,
+        'winner_new_balance', v_winner_balance
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION process_bet_payout(UUID) TO authenticated, anon;
+
+-- ============================================
+-- FIX #4: Bet Refund Function (for draws/abandons)
+-- ============================================
+DROP FUNCTION IF EXISTS refund_bet_to_both_players(UUID);
+
+CREATE OR REPLACE FUNCTION refund_bet_to_both_players(p_game_id UUID)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_game RECORD;
+BEGIN
+    -- Get game details with lock
+    SELECT * INTO v_game 
+    FROM chess_games 
+    WHERE id = p_game_id 
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Game not found');
+    END IF;
+    
+    -- Validate bet match
+    IF v_game.is_bet_match = false OR v_game.bet_amount IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Not a bet match');
+    END IF;
+    
+    -- Check if already refunded or paid out
+    IF v_game.bet_status = 'paid_out' THEN
+        RETURN json_build_object('success', false, 'error', 'Already processed');
+    END IF;
+    
+    -- Validate bet was locked
+    IF v_game.bet_status != 'locked' THEN
+        RETURN json_build_object('success', false, 'error', 'Bet was not locked');
+    END IF;
+    
+    -- Refund both players
+    UPDATE users
+    SET diamonds = diamonds + v_game.bet_amount, updated_at = NOW()
+    WHERE id IN (v_game.white_player_id, v_game.black_player_id);
+    
+    -- Record refund transactions
+    INSERT INTO diamond_transactions (user_id, type, amount, description, status)
+    VALUES 
+        (v_game.white_player_id, 'bet_refund', v_game.bet_amount, 
+         'Bet refunded - game ended in ' || v_game.status || ' (Game: ' || p_game_id || ')', 
+         'completed'),
+        (v_game.black_player_id, 'bet_refund', v_game.bet_amount, 
+         'Bet refunded - game ended in ' || v_game.status || ' (Game: ' || p_game_id || ')', 
+         'completed');
+    
+    -- Mark as paid out (refunded)
+    UPDATE chess_games
+    SET bet_status = 'paid_out', updated_at = NOW()
+    WHERE id = p_game_id;
+    
+    RAISE NOTICE '✅ Refunded % diamonds to both players', v_game.bet_amount;
+    
+    RETURN json_build_object(
+        'success', true,
+        'refund_amount', v_game.bet_amount,
+        'message', 'Bet refunded to both players'
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION refund_bet_to_both_players(UUID) TO authenticated, anon;
+
+-- ============================================
+-- FIX #5: Updated Auto-Payout Trigger
+-- ============================================
+DROP TRIGGER IF EXISTS trigger_auto_process_bet_payout ON chess_games;
+DROP FUNCTION IF EXISTS auto_process_bet_payout() CASCADE;
+
+CREATE OR REPLACE FUNCTION auto_process_bet_payout()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_result JSON;
+BEGIN
+    -- Only process bet matches
+    IF NEW.is_bet_match = false OR NEW.bet_amount IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    -- Check if bet is locked and not already paid out
+    IF NEW.bet_status != 'locked' OR OLD.bet_status = 'paid_out' THEN
+        RETURN NEW;
+    END IF;
+    
+    -- ✅ WINNER DETERMINED (checkmate or resignation)
+    IF (NEW.status IN ('checkmate', 'resigned') 
+        AND NEW.winner_id IS NOT NULL 
+        AND OLD.status NOT IN ('checkmate', 'resigned')) THEN
+        
+        RAISE NOTICE '🏆 Processing bet payout for winner: %', NEW.winner_id;
+        
+        SELECT * INTO v_result FROM process_bet_payout(NEW.id);
+        
+        IF (v_result->>'success')::boolean THEN
+            RAISE NOTICE '✅ Bet payout successful';
+        ELSE
+            RAISE WARNING '❌ Bet payout failed: %', v_result->>'error';
+        END IF;
+    END IF;
+    
+    -- ✅ DRAW/STALEMATE (refund both players)
+    IF (NEW.status IN ('stalemate', 'draw') 
+        AND OLD.status NOT IN ('stalemate', 'draw')) THEN
+        
+        RAISE NOTICE '🔄 Refunding bet to both players (game ended in %)', NEW.status;
+        
+        SELECT * INTO v_result FROM refund_bet_to_both_players(NEW.id);
+        
+        IF (v_result->>'success')::boolean THEN
+            RAISE NOTICE '✅ Bet refund successful';
+        ELSE
+            RAISE WARNING '❌ Bet refund failed: %', v_result->>'error';
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_auto_process_bet_payout
+    AFTER UPDATE ON chess_games
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_process_bet_payout();
+
+-- ============================================
+-- FIX #6: Cleanup Abandoned Bet Matches
+-- ============================================
+DROP FUNCTION IF EXISTS cleanup_abandoned_bet_matches();
+
+CREATE OR REPLACE FUNCTION cleanup_abandoned_bet_matches()
+RETURNS TABLE(
+    games_cleaned INTEGER,
+    diamonds_refunded INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_games_cleaned INTEGER := 0;
+    v_diamonds_refunded INTEGER := 0;
+    v_game RECORD;
+    v_result JSON;
+BEGIN
+    -- Find abandoned bet matches (locked for >30 mins, not finished)
+    FOR v_game IN
+        SELECT * FROM chess_games
+        WHERE is_bet_match = true
+          AND bet_status = 'locked'
+          AND status NOT IN ('checkmate', 'resigned', 'stalemate', 'draw')
+          AND updated_at < NOW() - INTERVAL '30 minutes'
+    LOOP
+        -- Mark as abandoned
+        UPDATE chess_games
+        SET status = 'abandoned', updated_at = NOW()
+        WHERE id = v_game.id;
+        
+        -- Refund bets
+        SELECT * INTO v_result FROM refund_bet_to_both_players(v_game.id);
+        
+        IF (v_result->>'success')::boolean THEN
+            v_games_cleaned := v_games_cleaned + 1;
+            v_diamonds_refunded := v_diamonds_refunded + (v_game.bet_amount * 2);
+            RAISE NOTICE '✅ Cleaned abandoned game: %, refunded: % diamonds', 
+                v_game.id, v_game.bet_amount * 2;
+        END IF;
+    END LOOP;
+    
+    RETURN QUERY SELECT v_games_cleaned, v_diamonds_refunded;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION cleanup_abandoned_bet_matches() TO authenticated, service_role;
+
+-- ============================================
+-- FIX #7: Validation View for Debugging
+-- ============================================
+DROP VIEW IF EXISTS bet_match_status CASCADE;
+
+CREATE OR REPLACE VIEW bet_match_status AS
+SELECT 
+    cg.id as game_id,
+    cg.status as game_status,
+    cg.bet_status,
+    cg.bet_amount,
+    cg.is_bet_match,
+    cg.winner_id,
+    cg.created_at,
+    cg.updated_at,
+    
+    -- Player 1 info
+    u1.display_name as white_player_name,
+    u1.diamonds as white_player_diamonds,
+    
+    -- Player 2 info
+    u2.display_name as black_player_name,
+    u2.diamonds as black_player_diamonds,
+    
+    -- Validation checks
+    CASE 
+        WHEN cg.is_bet_match = false THEN 'Not a bet match'
+        WHEN cg.bet_status = 'paid_out' THEN 'Already processed'
+        WHEN cg.bet_status = 'locked' AND cg.status IN ('checkmate', 'resigned') THEN 'Ready for payout'
+        WHEN cg.bet_status = 'locked' AND cg.status IN ('stalemate', 'draw') THEN 'Ready for refund'
+        WHEN cg.bet_status = 'locked' AND cg.updated_at < NOW() - INTERVAL '30 minutes' THEN 'Abandoned - needs refund'
+        WHEN cg.bet_status = 'pending' THEN 'Waiting for acceptance'
+        ELSE 'In progress'
+    END as status_message
+
+FROM chess_games cg
+LEFT JOIN users u1 ON u1.id = cg.white_player_id
+LEFT JOIN users u2 ON u2.id = cg.black_player_id
+WHERE cg.is_bet_match = true
+ORDER BY cg.created_at DESC;
+
+GRANT SELECT ON bet_match_status TO authenticated, anon;
+
+-- ============================================
+-- VERIFICATION TESTS
+-- ============================================
+DO $$
+DECLARE
+    test_game_id UUID;
+    test_player1 UUID := gen_random_uuid();
+    test_player2 UUID := gen_random_uuid();
+    deduct_result JSON;
+    payout_result JSON;
+    refund_result JSON;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🧪 TESTING BET MATCH SYSTEM';
+    RAISE NOTICE '========================================';
+    
+    -- Create test users with 1000 diamonds each
+    INSERT INTO users (id, email, display_name, diamonds, gender) VALUES
+        (test_player1, 'testbet1@test.com', 'Test Player 1', 1000, 'male'),
+        (test_player2, 'testbet2@test.com', 'Test Player 2', 1000, 'female');
+    
+    -- Create test game
+    INSERT INTO chess_games (white_player_id, black_player_id, is_bet_match, bet_amount, bet_status, status)
+    VALUES (test_player1, test_player2, true, 100, 'pending', 'pending')
+    RETURNING id INTO test_game_id;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '✅ Test game created: %', test_game_id;
+    
+    -- TEST 1: Atomic bet deduction
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 TEST 1: Atomic bet deduction';
+    SELECT * INTO deduct_result FROM deduct_bet_from_both_players(
+        test_game_id, test_player1, test_player2, 100
+    );
+    
+    IF (deduct_result->>'success')::boolean THEN
+        RAISE NOTICE '  ✅ PASSED: Bet deducted successfully';
+        RAISE NOTICE '    Player 1 balance: %', deduct_result->>'player1_new_balance';
+        RAISE NOTICE '    Player 2 balance: %', deduct_result->>'player2_new_balance';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: %', deduct_result->>'error';
+    END IF;
+    
+    -- TEST 2: Payout on win
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 TEST 2: Bet payout';
+    UPDATE chess_games 
+    SET status = 'checkmate', winner_id = test_player1
+    WHERE id = test_game_id;
+    
+    SELECT * INTO payout_result FROM process_bet_payout(test_game_id);
+    
+    IF (payout_result->>'success')::boolean THEN
+        RAISE NOTICE '  ✅ PASSED: Payout successful';
+        RAISE NOTICE '    Winner balance: %', payout_result->>'winner_new_balance';
+        RAISE NOTICE '    Payout amount: %', payout_result->>'payout_amount';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: %', payout_result->>'error';
+    END IF;
+    
+    -- TEST 3: Refund on draw
+    INSERT INTO chess_games (white_player_id, black_player_id, is_bet_match, bet_amount, bet_status, status)
+    VALUES (test_player1, test_player2, true, 50, 'locked', 'active')
+    RETURNING id INTO test_game_id;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 TEST 3: Bet refund on draw';
+    UPDATE chess_games 
+    SET status = 'stalemate'
+    WHERE id = test_game_id;
+    
+    SELECT * INTO refund_result FROM refund_bet_to_both_players(test_game_id);
+    
+    IF (refund_result->>'success')::boolean THEN
+        RAISE NOTICE '  ✅ PASSED: Refund successful';
+        RAISE NOTICE '    Refund amount: %', refund_result->>'refund_amount';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: %', refund_result->>'error';
+    END IF;
+    
+    -- Cleanup
+    DELETE FROM users WHERE email LIKE 'testbet%@test.com';
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ ALL TESTS COMPLETED';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '';
+    RAISE NOTICE '📋 New Functions:';
+    RAISE NOTICE '  • deduct_bet_from_both_players() - Atomic bet locking';
+    RAISE NOTICE '  • process_bet_payout() - Secure winner payout';
+    RAISE NOTICE '  • refund_bet_to_both_players() - Draw/abandon refunds';
+    RAISE NOTICE '  • cleanup_abandoned_bet_matches() - Auto-cleanup';
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 Monitoring View:';
+    RAISE NOTICE '  • bet_match_status - View all bet match statuses';
+    RAISE NOTICE '';
+    RAISE NOTICE '🔒 Security Features:';
+    RAISE NOTICE '  ✓ Atomic transactions (all or nothing)';
+    RAISE NOTICE '  ✓ Row-level locking (no race conditions)';
+    RAISE NOTICE '  ✓ Balance validation before deduction';
+    RAISE NOTICE '  ✓ Duplicate payout prevention';
+    RAISE NOTICE '  ✓ Complete transaction logging';
+    RAISE NOTICE '========================================';
+END $$;
+
+
+
+------- FILE 61 
+
+
+
+
+
+-- ============================================
+-- 🔧 PRODUCTION-READY BET MATCH SYSTEM FIX
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+-- ============================================
+-- FIX #1: Add missing chess_room_id column (if not exists)
+-- ============================================
+ALTER TABLE chess_games 
+ADD COLUMN IF NOT EXISTS chess_room_id UUID REFERENCES rooms(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_chess_games_chess_room_id 
+ON chess_games(chess_room_id);
+
+-- ============================================
+-- FIX #2: Atomic Bet Deduction Function
+-- Prevents partial failures and race conditions
+-- ============================================
+DROP FUNCTION IF EXISTS deduct_bet_from_both_players(UUID, UUID, UUID, INTEGER);
+
+CREATE OR REPLACE FUNCTION deduct_bet_from_both_players(
+    p_game_id UUID,
+    p_player1_id UUID,
+    p_player2_id UUID,
+    p_bet_amount INTEGER
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_player1_diamonds INTEGER;
+    v_player2_diamonds INTEGER;
+    v_error_message TEXT;
+BEGIN
+    -- Lock both users to prevent race conditions
+    PERFORM * FROM users 
+    WHERE id IN (p_player1_id, p_player2_id) 
+    FOR UPDATE;
+    
+    -- Check player 1 balance
+    SELECT diamonds INTO v_player1_diamonds
+    FROM users WHERE id = p_player1_id;
+    
+    IF v_player1_diamonds IS NULL THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 1 not found'
+        );
+    END IF;
+    
+    IF v_player1_diamonds < p_bet_amount THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 1 has insufficient diamonds',
+            'player1_diamonds', v_player1_diamonds,
+            'required', p_bet_amount
+        );
+    END IF;
+    
+    -- Check player 2 balance
+    SELECT diamonds INTO v_player2_diamonds
+    FROM users WHERE id = p_player2_id;
+    
+    IF v_player2_diamonds IS NULL THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 2 not found'
+        );
+    END IF;
+    
+    IF v_player2_diamonds < p_bet_amount THEN
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Player 2 has insufficient diamonds',
+            'player2_diamonds', v_player2_diamonds,
+            'required', p_bet_amount
+        );
+    END IF;
+    
+    -- ✅ ATOMIC DEDUCTION: Both or none
+    BEGIN
+        -- Deduct from player 1
+        UPDATE users 
+        SET diamonds = diamonds - p_bet_amount, updated_at = NOW()
+        WHERE id = p_player1_id;
+        
+        -- Deduct from player 2
+        UPDATE users 
+        SET diamonds = diamonds - p_bet_amount, updated_at = NOW()
+        WHERE id = p_player2_id;
+        
+        -- Record transactions
+        INSERT INTO diamond_transactions (user_id, type, amount, description, status)
+        VALUES 
+            (p_player1_id, 'bet_deduct', -p_bet_amount, 
+             'Chess bet locked: ' || p_bet_amount || ' diamonds (Game: ' || p_game_id || ')', 
+             'completed'),
+            (p_player2_id, 'bet_deduct', -p_bet_amount, 
+             'Chess bet locked: ' || p_bet_amount || ' diamonds (Game: ' || p_game_id || ')', 
+             'completed');
+        
+        -- Update game bet status
+        UPDATE chess_games
+        SET bet_status = 'locked', updated_at = NOW()
+        WHERE id = p_game_id;
+        
+        RAISE NOTICE '✅ Bet deducted successfully: % diamonds from both players', p_bet_amount;
+        
+        RETURN json_build_object(
+            'success', true,
+            'message', 'Bet locked successfully',
+            'player1_new_balance', v_player1_diamonds - p_bet_amount,
+            'player2_new_balance', v_player2_diamonds - p_bet_amount
+        );
+        
+    EXCEPTION WHEN OTHERS THEN
+        -- Automatic rollback on any error
+        v_error_message := SQLERRM;
+        RAISE WARNING '❌ Bet deduction failed: %', v_error_message;
+        
+        RETURN json_build_object(
+            'success', false,
+            'error', 'Transaction failed: ' || v_error_message
+        );
+    END;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION deduct_bet_from_both_players(UUID, UUID, UUID, INTEGER) TO authenticated, anon;
+
+-- ============================================
+-- FIX #3: Enhanced Bet Payout with Validation
+-- ============================================
+DROP FUNCTION IF EXISTS process_bet_payout(UUID);
+
+CREATE OR REPLACE FUNCTION process_bet_payout(p_game_id UUID)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_game RECORD;
+    v_payout_amount INTEGER;
+    v_winner_balance INTEGER;
+BEGIN
+    -- Get game details with lock
+    SELECT * INTO v_game 
+    FROM chess_games 
+    WHERE id = p_game_id 
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Game not found');
+    END IF;
+    
+    -- Validate bet match
+    IF v_game.is_bet_match = false THEN
+        RETURN json_build_object('success', false, 'error', 'Not a bet match');
+    END IF;
+    
+    -- Check if already paid out
+    IF v_game.bet_status = 'paid_out' THEN
+        RETURN json_build_object('success', false, 'error', 'Already paid out');
+    END IF;
+    
+    -- Validate bet was locked
+    IF v_game.bet_status != 'locked' THEN
+        RETURN json_build_object('success', false, 'error', 'Bet was not locked');
+    END IF;
+    
+    -- Validate winner exists
+    IF v_game.winner_id IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'No winner declared');
+    END IF;
+    
+    -- Validate bet amount
+    IF v_game.bet_amount IS NULL OR v_game.bet_amount <= 0 THEN
+        RETURN json_build_object('success', false, 'error', 'Invalid bet amount');
+    END IF;
+    
+    -- Calculate payout (winner gets 2x bet)
+    v_payout_amount := v_game.bet_amount * 2;
+    
+    -- Award diamonds to winner
+    UPDATE users
+    SET diamonds = diamonds + v_payout_amount, updated_at = NOW()
+    WHERE id = v_game.winner_id
+    RETURNING diamonds INTO v_winner_balance;
+    
+    -- Record transaction
+    INSERT INTO diamond_transactions (user_id, type, amount, description, status)
+    VALUES (
+        v_game.winner_id, 
+        'bet_win', 
+        v_payout_amount, 
+        'Won chess bet: ' || v_payout_amount || ' diamonds (Game: ' || p_game_id || ')', 
+        'completed'
+    );
+    
+    -- Mark as paid out
+    UPDATE chess_games
+    SET bet_status = 'paid_out', updated_at = NOW()
+    WHERE id = p_game_id;
+    
+    RAISE NOTICE '✅ Paid out % diamonds to winner %', v_payout_amount, v_game.winner_id;
+    
+    RETURN json_build_object(
+        'success', true,
+        'winner_id', v_game.winner_id,
+        'payout_amount', v_payout_amount,
+        'winner_new_balance', v_winner_balance
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION process_bet_payout(UUID) TO authenticated, anon;
+
+-- ============================================
+-- FIX #4: Bet Refund Function (for draws/abandons)
+-- ============================================
+DROP FUNCTION IF EXISTS refund_bet_to_both_players(UUID);
+
+CREATE OR REPLACE FUNCTION refund_bet_to_both_players(p_game_id UUID)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_game RECORD;
+BEGIN
+    -- Get game details with lock
+    SELECT * INTO v_game 
+    FROM chess_games 
+    WHERE id = p_game_id 
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Game not found');
+    END IF;
+    
+    -- Validate bet match
+    IF v_game.is_bet_match = false OR v_game.bet_amount IS NULL THEN
+        RETURN json_build_object('success', false, 'error', 'Not a bet match');
+    END IF;
+    
+    -- Check if already refunded or paid out
+    IF v_game.bet_status = 'paid_out' THEN
+        RETURN json_build_object('success', false, 'error', 'Already processed');
+    END IF;
+    
+    -- Validate bet was locked
+    IF v_game.bet_status != 'locked' THEN
+        RETURN json_build_object('success', false, 'error', 'Bet was not locked');
+    END IF;
+    
+    -- Refund both players
+    UPDATE users
+    SET diamonds = diamonds + v_game.bet_amount, updated_at = NOW()
+    WHERE id IN (v_game.white_player_id, v_game.black_player_id);
+    
+    -- Record refund transactions
+    INSERT INTO diamond_transactions (user_id, type, amount, description, status)
+    VALUES 
+        (v_game.white_player_id, 'bet_refund', v_game.bet_amount, 
+         'Bet refunded - game ended in ' || v_game.status || ' (Game: ' || p_game_id || ')', 
+         'completed'),
+        (v_game.black_player_id, 'bet_refund', v_game.bet_amount, 
+         'Bet refunded - game ended in ' || v_game.status || ' (Game: ' || p_game_id || ')', 
+         'completed');
+    
+    -- Mark as paid out (refunded)
+    UPDATE chess_games
+    SET bet_status = 'paid_out', updated_at = NOW()
+    WHERE id = p_game_id;
+    
+    RAISE NOTICE '✅ Refunded % diamonds to both players', v_game.bet_amount;
+    
+    RETURN json_build_object(
+        'success', true,
+        'refund_amount', v_game.bet_amount,
+        'message', 'Bet refunded to both players'
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION refund_bet_to_both_players(UUID) TO authenticated, anon;
+
+-- ============================================
+-- FIX #5: Updated Auto-Payout Trigger
+-- ============================================
+DROP TRIGGER IF EXISTS trigger_auto_process_bet_payout ON chess_games;
+DROP FUNCTION IF EXISTS auto_process_bet_payout() CASCADE;
+
+CREATE OR REPLACE FUNCTION auto_process_bet_payout()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_result JSON;
+BEGIN
+    -- Only process bet matches
+    IF NEW.is_bet_match = false OR NEW.bet_amount IS NULL THEN
+        RETURN NEW;
+    END IF;
+    
+    -- Check if bet is locked and not already paid out
+    IF NEW.bet_status != 'locked' OR OLD.bet_status = 'paid_out' THEN
+        RETURN NEW;
+    END IF;
+    
+    -- ✅ WINNER DETERMINED (checkmate or resignation)
+    IF (NEW.status IN ('checkmate', 'resigned') 
+        AND NEW.winner_id IS NOT NULL 
+        AND OLD.status NOT IN ('checkmate', 'resigned')) THEN
+        
+        RAISE NOTICE '🏆 Processing bet payout for winner: %', NEW.winner_id;
+        
+        SELECT * INTO v_result FROM process_bet_payout(NEW.id);
+        
+        IF (v_result->>'success')::boolean THEN
+            RAISE NOTICE '✅ Bet payout successful';
+        ELSE
+            RAISE WARNING '❌ Bet payout failed: %', v_result->>'error';
+        END IF;
+    END IF;
+    
+    -- ✅ DRAW/STALEMATE (refund both players)
+    IF (NEW.status IN ('stalemate', 'draw') 
+        AND OLD.status NOT IN ('stalemate', 'draw')) THEN
+        
+        RAISE NOTICE '🔄 Refunding bet to both players (game ended in %)', NEW.status;
+        
+        SELECT * INTO v_result FROM refund_bet_to_both_players(NEW.id);
+        
+        IF (v_result->>'success')::boolean THEN
+            RAISE NOTICE '✅ Bet refund successful';
+        ELSE
+            RAISE WARNING '❌ Bet refund failed: %', v_result->>'error';
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_auto_process_bet_payout
+    AFTER UPDATE ON chess_games
+    FOR EACH ROW
+    EXECUTE FUNCTION auto_process_bet_payout();
+
+-- ============================================
+-- FIX #6: Cleanup Abandoned Bet Matches
+-- ============================================
+DROP FUNCTION IF EXISTS cleanup_abandoned_bet_matches();
+
+CREATE OR REPLACE FUNCTION cleanup_abandoned_bet_matches()
+RETURNS TABLE(
+    games_cleaned INTEGER,
+    diamonds_refunded INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_games_cleaned INTEGER := 0;
+    v_diamonds_refunded INTEGER := 0;
+    v_game RECORD;
+    v_result JSON;
+BEGIN
+    -- Find abandoned bet matches (locked for >30 mins, not finished)
+    FOR v_game IN
+        SELECT * FROM chess_games
+        WHERE is_bet_match = true
+          AND bet_status = 'locked'
+          AND status NOT IN ('checkmate', 'resigned', 'stalemate', 'draw')
+          AND updated_at < NOW() - INTERVAL '30 minutes'
+    LOOP
+        -- Mark as abandoned
+        UPDATE chess_games
+        SET status = 'abandoned', updated_at = NOW()
+        WHERE id = v_game.id;
+        
+        -- Refund bets
+        SELECT * INTO v_result FROM refund_bet_to_both_players(v_game.id);
+        
+        IF (v_result->>'success')::boolean THEN
+            v_games_cleaned := v_games_cleaned + 1;
+            v_diamonds_refunded := v_diamonds_refunded + (v_game.bet_amount * 2);
+            RAISE NOTICE '✅ Cleaned abandoned game: %, refunded: % diamonds', 
+                v_game.id, v_game.bet_amount * 2;
+        END IF;
+    END LOOP;
+    
+    RETURN QUERY SELECT v_games_cleaned, v_diamonds_refunded;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION cleanup_abandoned_bet_matches() TO authenticated, service_role;
+
+-- ============================================
+-- FIX #7: Validation View for Debugging
+-- ============================================
+DROP VIEW IF EXISTS bet_match_status CASCADE;
+
+CREATE OR REPLACE VIEW bet_match_status AS
+SELECT 
+    cg.id as game_id,
+    cg.status as game_status,
+    cg.bet_status,
+    cg.bet_amount,
+    cg.is_bet_match,
+    cg.winner_id,
+    cg.created_at,
+    cg.updated_at,
+    
+    -- Player 1 info
+    u1.display_name as white_player_name,
+    u1.diamonds as white_player_diamonds,
+    
+    -- Player 2 info
+    u2.display_name as black_player_name,
+    u2.diamonds as black_player_diamonds,
+    
+    -- Validation checks
+    CASE 
+        WHEN cg.is_bet_match = false THEN 'Not a bet match'
+        WHEN cg.bet_status = 'paid_out' THEN 'Already processed'
+        WHEN cg.bet_status = 'locked' AND cg.status IN ('checkmate', 'resigned') THEN 'Ready for payout'
+        WHEN cg.bet_status = 'locked' AND cg.status IN ('stalemate', 'draw') THEN 'Ready for refund'
+        WHEN cg.bet_status = 'locked' AND cg.updated_at < NOW() - INTERVAL '30 minutes' THEN 'Abandoned - needs refund'
+        WHEN cg.bet_status = 'pending' THEN 'Waiting for acceptance'
+        ELSE 'In progress'
+    END as status_message
+
+FROM chess_games cg
+LEFT JOIN users u1 ON u1.id = cg.white_player_id
+LEFT JOIN users u2 ON u2.id = cg.black_player_id
+WHERE cg.is_bet_match = true
+ORDER BY cg.created_at DESC;
+
+GRANT SELECT ON bet_match_status TO authenticated, anon;
+
+-- ============================================
+-- VERIFICATION TESTS
+-- ============================================
+DO $$
+DECLARE
+    test_game_id UUID;
+    test_player1 UUID := gen_random_uuid();
+    test_player2 UUID := gen_random_uuid();
+    deduct_result JSON;
+    payout_result JSON;
+    refund_result JSON;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🧪 TESTING BET MATCH SYSTEM';
+    RAISE NOTICE '========================================';
+    
+    -- Create test users with 1000 diamonds each
+    INSERT INTO users (id, email, display_name, diamonds, gender) VALUES
+        (test_player1, 'testbet1@test.com', 'Test Player 1', 1000, 'male'),
+        (test_player2, 'testbet2@test.com', 'Test Player 2', 1000, 'female');
+    
+    -- Create test game
+    INSERT INTO chess_games (white_player_id, black_player_id, is_bet_match, bet_amount, bet_status, status)
+    VALUES (test_player1, test_player2, true, 100, 'pending', 'pending')
+    RETURNING id INTO test_game_id;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '✅ Test game created: %', test_game_id;
+    
+    -- TEST 1: Atomic bet deduction
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 TEST 1: Atomic bet deduction';
+    SELECT * INTO deduct_result FROM deduct_bet_from_both_players(
+        test_game_id, test_player1, test_player2, 100
+    );
+    
+    IF (deduct_result->>'success')::boolean THEN
+        RAISE NOTICE '  ✅ PASSED: Bet deducted successfully';
+        RAISE NOTICE '    Player 1 balance: %', deduct_result->>'player1_new_balance';
+        RAISE NOTICE '    Player 2 balance: %', deduct_result->>'player2_new_balance';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: %', deduct_result->>'error';
+    END IF;
+    
+    -- TEST 2: Payout on win
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 TEST 2: Bet payout';
+    UPDATE chess_games 
+    SET status = 'checkmate', winner_id = test_player1
+    WHERE id = test_game_id;
+    
+    SELECT * INTO payout_result FROM process_bet_payout(test_game_id);
+    
+    IF (payout_result->>'success')::boolean THEN
+        RAISE NOTICE '  ✅ PASSED: Payout successful';
+        RAISE NOTICE '    Winner balance: %', payout_result->>'winner_new_balance';
+        RAISE NOTICE '    Payout amount: %', payout_result->>'payout_amount';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: %', payout_result->>'error';
+    END IF;
+    
+    -- TEST 3: Refund on draw
+    INSERT INTO chess_games (white_player_id, black_player_id, is_bet_match, bet_amount, bet_status, status)
+    VALUES (test_player1, test_player2, true, 50, 'locked', 'active')
+    RETURNING id INTO test_game_id;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 TEST 3: Bet refund on draw';
+    UPDATE chess_games 
+    SET status = 'stalemate'
+    WHERE id = test_game_id;
+    
+    SELECT * INTO refund_result FROM refund_bet_to_both_players(test_game_id);
+    
+    IF (refund_result->>'success')::boolean THEN
+        RAISE NOTICE '  ✅ PASSED: Refund successful';
+        RAISE NOTICE '    Refund amount: %', refund_result->>'refund_amount';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: %', refund_result->>'error';
+    END IF;
+    
+    -- Cleanup test data (delete games first, then users)
+    DELETE FROM chess_games 
+    WHERE white_player_id IN (
+        SELECT id FROM users WHERE email LIKE 'testbet%@test.com'
+    );
+    
+    DELETE FROM users WHERE email LIKE 'testbet%@test.com';
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ ALL TESTS COMPLETED';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '';
+    RAISE NOTICE '📋 New Functions:';
+    RAISE NOTICE '  • deduct_bet_from_both_players() - Atomic bet locking';
+    RAISE NOTICE '  • process_bet_payout() - Secure winner payout';
+    RAISE NOTICE '  • refund_bet_to_both_players() - Draw/abandon refunds';
+    RAISE NOTICE '  • cleanup_abandoned_bet_matches() - Auto-cleanup';
+    RAISE NOTICE '';
+    RAISE NOTICE '📊 Monitoring View:';
+    RAISE NOTICE '  • bet_match_status - View all bet match statuses';
+    RAISE NOTICE '';
+    RAISE NOTICE '🔒 Security Features:';
+    RAISE NOTICE '  ✓ Atomic transactions (all or nothing)';
+    RAISE NOTICE '  ✓ Row-level locking (no race conditions)';
+    RAISE NOTICE '  ✓ Balance validation before deduction';
+    RAISE NOTICE '  ✓ Duplicate payout prevention';
+    RAISE NOTICE '  ✓ Complete transaction logging';
+    RAISE NOTICE '========================================';
+END $$;
+
+
+
+-------- FILE 62
+
+
+
+-- ============================================
+-- 🔧 COMPLETE NEXT ROOM FIX
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+-- Drop old functions
+DROP FUNCTION IF EXISTS find_compatible_room_simple(UUID, gender_preference, INTEGER);
+
+-- ============================================
+-- NEW: Unified matchmaking function for Next Room
+-- ============================================
+CREATE OR REPLACE FUNCTION find_compatible_room_simple(
+    p_user_id UUID,
+    p_user_gender gender_preference,
+    p_room_size INTEGER
+)
+RETURNS TABLE(matched_room_id UUID, is_new_room BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_found_room_id UUID;
+    v_created_room_id UUID;
+    v_opposite_gender gender_preference;
+BEGIN
+    -- Validation
+    IF p_user_gender NOT IN ('male', 'female') THEN
+        RAISE EXCEPTION 'Only "male" or "female" gender allowed for public matching';
+    END IF;
+    
+    -- Determine opposite gender
+    IF p_user_gender = 'male' THEN
+        v_opposite_gender := 'female';
+    ELSE
+        v_opposite_gender := 'male';
+    END IF;
+    
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 NEXT ROOM SEARCH';
+    RAISE NOTICE 'User: % (Gender: %)', p_user_id, p_user_gender;
+    RAISE NOTICE 'Room Size: %', p_room_size;
+    RAISE NOTICE '========================================';
+    
+    -- Update user's gender
+    UPDATE public.users
+    SET gender = p_user_gender, updated_at = NOW()
+    WHERE id = p_user_id;
+    
+    -- ✅ CRITICAL: Leave ALL existing rooms first
+    UPDATE public.room_participants
+    SET left_at = NOW()
+    WHERE user_id = p_user_id AND left_at IS NULL;
+    
+    RAISE NOTICE '✅ Left all existing rooms';
+    
+    -- ============================================
+    -- STEP 1: Try OPPOSITE gender first
+    -- ============================================
+    RAISE NOTICE '🔍 STEP 1: Looking for opposite gender (%)', v_opposite_gender;
+    
+    SELECT r.id INTO v_found_room_id
+    FROM public.rooms r
+    WHERE r.room_type = 'public'
+      AND r.is_active = true
+      AND r.room_size = p_room_size
+      AND r.creator_gender = v_opposite_gender    -- Creator is opposite gender
+      AND r.gender_preference = p_user_gender     -- Room wants my gender
+      AND r.creator_id != p_user_id               -- Not my own room
+      AND (
+          SELECT COUNT(*) 
+          FROM public.room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) < p_room_size
+      AND (
+          SELECT COUNT(*) 
+          FROM public.room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) > 0  -- ✅ NEW: Must have at least 1 person waiting
+    ORDER BY r.created_at ASC
+    LIMIT 1;
+    
+    IF v_found_room_id IS NOT NULL THEN
+        RAISE NOTICE '✅ MATCHED opposite gender room: %', v_found_room_id;
+        RAISE NOTICE '========================================';
+        RETURN QUERY SELECT v_found_room_id AS matched_room_id, false AS is_new_room;
+        RETURN;
+    END IF;
+    
+    RAISE NOTICE '⚠️ No opposite gender match found';
+    
+    -- ============================================
+    -- STEP 2: Fallback to SAME gender
+    -- ============================================
+    RAISE NOTICE '🔍 STEP 2: Looking for same gender (%)', p_user_gender;
+    
+    SELECT r.id INTO v_found_room_id
+    FROM public.rooms r
+    WHERE r.room_type = 'public'
+      AND r.is_active = true
+      AND r.room_size = p_room_size
+      AND r.creator_gender = p_user_gender        -- Creator is same gender
+      AND r.gender_preference = v_opposite_gender -- Room wants opposite
+      AND r.creator_id != p_user_id               -- Not my own room
+      AND (
+          SELECT COUNT(*) 
+          FROM public.room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) < p_room_size
+      AND (
+          SELECT COUNT(*) 
+          FROM public.room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) > 0  -- ✅ NEW: Must have at least 1 person waiting
+    ORDER BY r.created_at ASC
+    LIMIT 1;
+    
+    IF v_found_room_id IS NOT NULL THEN
+        RAISE NOTICE '✅ MATCHED same gender room (fallback): %', v_found_room_id;
+        RAISE NOTICE '========================================';
+        RETURN QUERY SELECT v_found_room_id AS matched_room_id, false AS is_new_room;
+        RETURN;
+    END IF;
+    
+    RAISE NOTICE '⚠️ No same gender match found';
+    
+    -- ============================================
+    -- STEP 3: Try ANY room with space (for 4-person)
+    -- ============================================
+    IF p_room_size = 4 THEN
+        RAISE NOTICE '🔍 STEP 3: Looking for ANY 4-person room with space';
+        
+        SELECT r.id INTO v_found_room_id
+        FROM public.rooms r
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 4
+          AND r.creator_id != p_user_id
+          AND (
+              SELECT COUNT(*) 
+              FROM public.room_participants rp
+              WHERE rp.room_id = r.id AND rp.left_at IS NULL
+          ) BETWEEN 1 AND 3  -- ✅ Has 1-3 people (not empty, not full)
+        ORDER BY r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ MATCHED 4-person room: %', v_found_room_id;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id AS matched_room_id, false AS is_new_room;
+            RETURN;
+        END IF;
+    END IF;
+    
+    RAISE NOTICE '⚠️ No available room found';
+    
+    -- ============================================
+    -- STEP 4: Create new room
+    -- ============================================
+    RAISE NOTICE '🏗️ CREATING NEW ROOM';
+    
+    INSERT INTO public.rooms (
+        room_type,
+        room_size,
+        gender_preference,    -- Want opposite gender
+        interest_category,    -- Default to 'random'
+        creator_id,
+        creator_gender,       -- My gender
+        is_active
+    )
+    VALUES (
+        'public',
+        p_room_size,
+        v_opposite_gender,    -- Prefer opposite gender
+        'random',             -- Default interest
+        p_user_id,
+        p_user_gender,        -- I am this gender
+        true
+    )
+    RETURNING id INTO v_created_room_id;
+    
+    RAISE NOTICE '✅ CREATED new room: %', v_created_room_id;
+    RAISE NOTICE '  Creator: % (gender: %)', p_user_id, p_user_gender;
+    RAISE NOTICE '  Prefers: %', v_opposite_gender;
+    RAISE NOTICE '========================================';
+    
+    RETURN QUERY SELECT v_created_room_id AS matched_room_id, true AS is_new_room;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION find_compatible_room_simple(UUID, gender_preference, INTEGER) TO authenticated, anon;
+
+-- ============================================
+-- TEST THE FIX
+-- ============================================
+DO $$
+DECLARE
+    test_male UUID := gen_random_uuid();
+    test_female UUID := gen_random_uuid();
+    result1 RECORD;
+    result2 RECORD;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🧪 TESTING NEXT ROOM FUNCTION';
+    RAISE NOTICE '========================================';
+    
+    -- Create test users
+    INSERT INTO users (id, email, display_name, gender) VALUES
+        (test_male, 'test_next_male@test.com', 'Test Male', 'male'),
+        (test_female, 'test_next_female@test.com', 'Test Female', 'female');
+    
+    -- Test 1: Male creates room
+    RAISE NOTICE '';
+    RAISE NOTICE '👤 TEST 1: Male creates 2-person room';
+    SELECT * INTO result1 FROM find_compatible_room_simple(test_male, 'male'::gender_preference, 2);
+    RAISE NOTICE '  Room: %', result1.matched_room_id;
+    RAISE NOTICE '  Is New: % (Expected: true)', result1.is_new_room;
+    
+    -- Test 2: Female should match
+    RAISE NOTICE '';
+    RAISE NOTICE '👤 TEST 2: Female tries next room';
+    SELECT * INTO result2 FROM find_compatible_room_simple(test_female, 'female'::gender_preference, 2);
+    RAISE NOTICE '  Room: %', result2.matched_room_id;
+    RAISE NOTICE '  Is New: % (Expected: false)', result2.is_new_room;
+    
+    IF result1.matched_room_id = result2.matched_room_id THEN
+        RAISE NOTICE '  ✅ SUCCESS: Both matched same room!';
+    ELSE
+        RAISE NOTICE '  ❌ FAILED: Different rooms';
+    END IF;
+    
+    -- Cleanup
+    DELETE FROM users WHERE email LIKE 'test_next_%@test.com';
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ NEXT ROOM FUNCTION READY';
+    RAISE NOTICE '========================================';
+END $$;
+
+
+
+------- FILE - 63
+
+
+-- ============================================
+-- 🔧 PRODUCTION-READY NEXT ROOM FIX
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+DROP FUNCTION IF EXISTS find_compatible_room_simple(UUID, gender_preference, INTEGER);
+
+CREATE OR REPLACE FUNCTION find_compatible_room_simple(
+    p_user_id UUID,
+    p_user_gender gender_preference,
+    p_room_size INTEGER
+)
+RETURNS TABLE(matched_room_id UUID, is_new_room BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_found_room_id UUID;
+    v_created_room_id UUID;
+    v_opposite_gender gender_preference;
+    v_last_room_id UUID;
+BEGIN
+    -- ✅ FIX #1: Validate gender (block 'other')
+    IF p_user_gender NOT IN ('male', 'female') THEN
+        RAISE EXCEPTION 'Gender must be "male" or "female" for public rooms. Please update your profile.';
+    END IF;
+    
+    -- Determine opposite gender
+    IF p_user_gender = 'male' THEN
+        v_opposite_gender := 'female';
+    ELSE
+        v_opposite_gender := 'male';
+    END IF;
+    
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 NEXT ROOM REQUEST';
+    RAISE NOTICE 'User: % (Gender: %)', p_user_id, p_user_gender;
+    RAISE NOTICE 'Room Size: %', p_room_size;
+    RAISE NOTICE '========================================';
+    
+    -- ✅ FIX #2: Get last room to avoid re-matching
+    SELECT room_id INTO v_last_room_id
+    FROM room_participants
+    WHERE user_id = p_user_id
+    ORDER BY left_at DESC NULLS FIRST
+    LIMIT 1;
+    
+    -- Update user's gender
+    UPDATE public.users
+    SET gender = p_user_gender, updated_at = NOW()
+    WHERE id = p_user_id;
+    
+    -- ✅ FIX #3: Properly leave existing rooms
+    UPDATE public.room_participants
+    SET left_at = NOW()
+    WHERE user_id = p_user_id AND left_at IS NULL;
+    
+    -- Wait a moment for cleanup
+    PERFORM pg_sleep(0.1);
+    
+    -- ============================================
+    -- MATCHING LOGIC
+    -- ============================================
+    
+    IF p_room_size = 4 THEN
+        -- 4-PERSON ROOM: Join any available
+        RAISE NOTICE '🔍 Looking for 4-person room...';
+        
+        SELECT r.id INTO v_found_room_id
+        FROM public.rooms r
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 4
+          AND r.id != COALESCE(v_last_room_id, '00000000-0000-0000-0000-000000000000') -- ✅ Avoid last room
+          AND r.creator_id != p_user_id
+          AND (
+              SELECT COUNT(*) 
+              FROM public.room_participants rp
+              WHERE rp.room_id = r.id AND rp.left_at IS NULL
+          ) < 4
+        ORDER BY r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ MATCHED 4-person room: %', v_found_room_id;
+            RETURN QUERY SELECT v_found_room_id AS matched_room_id, false AS is_new_room;
+            RETURN;
+        END IF;
+        
+        -- Create new 4-person room
+        INSERT INTO public.rooms (room_type, room_size, gender_preference, interest_category, creator_id, creator_gender, is_active)
+        VALUES ('public', 4, v_opposite_gender, 'random', p_user_id, p_user_gender, true)
+        RETURNING id INTO v_created_room_id;
+        
+        RAISE NOTICE '✅ CREATED 4-person room: %', v_created_room_id;
+        RETURN QUERY SELECT v_created_room_id AS matched_room_id, true AS is_new_room;
+        RETURN;
+    END IF;
+    
+    -- 2-PERSON ROOM: Opposite > Same > Create
+    RAISE NOTICE '🔍 Looking for opposite gender (%)...', v_opposite_gender;
+    
+    SELECT r.id INTO v_found_room_id
+    FROM public.rooms r
+    WHERE r.room_type = 'public'
+      AND r.is_active = true
+      AND r.room_size = 2
+      AND r.id != COALESCE(v_last_room_id, '00000000-0000-0000-0000-000000000000') -- ✅ Avoid last room
+      AND r.creator_gender = v_opposite_gender
+      AND r.gender_preference = p_user_gender
+      AND r.creator_id != p_user_id
+      AND (
+          SELECT COUNT(*) 
+          FROM public.room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) < 2
+    ORDER BY r.created_at ASC
+    LIMIT 1;
+    
+    IF v_found_room_id IS NOT NULL THEN
+        RAISE NOTICE '✅ MATCHED opposite gender room: %', v_found_room_id;
+        RETURN QUERY SELECT v_found_room_id AS matched_room_id, false AS is_new_room;
+        RETURN;
+    END IF;
+    
+    -- Fallback: Same gender
+    RAISE NOTICE '🔍 Fallback: Looking for same gender (%)...', p_user_gender;
+    
+    SELECT r.id INTO v_found_room_id
+    FROM public.rooms r
+    WHERE r.room_type = 'public'
+      AND r.is_active = true
+      AND r.room_size = 2
+      AND r.id != COALESCE(v_last_room_id, '00000000-0000-0000-0000-000000000000')
+      AND r.creator_gender = p_user_gender
+      AND r.creator_id != p_user_id
+      AND (
+          SELECT COUNT(*) 
+          FROM public.room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) < 2
+    ORDER BY r.created_at ASC
+    LIMIT 1;
+    
+    IF v_found_room_id IS NOT NULL THEN
+        RAISE NOTICE '✅ MATCHED same gender room: %', v_found_room_id;
+        RETURN QUERY SELECT v_found_room_id AS matched_room_id, false AS is_new_room;
+        RETURN;
+    END IF;
+    
+    -- Create new room
+    INSERT INTO public.rooms (room_type, room_size, gender_preference, interest_category, creator_id, creator_gender, is_active)
+    VALUES ('public', 2, v_opposite_gender, 'random', p_user_id, p_user_gender, true)
+    RETURNING id INTO v_created_room_id;
+    
+    RAISE NOTICE '✅ CREATED 2-person room: %', v_created_room_id;
+    RETURN QUERY SELECT v_created_room_id AS matched_room_id, true AS is_new_room;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION find_compatible_room_simple(UUID, gender_preference, INTEGER) TO authenticated, anon;
+
+-- ============================================
+-- ✅ VERIFICATION
+-- ============================================
+DO $$
+BEGIN
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ NEXT ROOM FIX INSTALLED';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE 'Improvements:';
+    RAISE NOTICE '  ✓ Blocks "other" gender';
+    RAISE NOTICE '  ✓ Avoids re-matching last room';
+    RAISE NOTICE '  ✓ Proper cleanup timing';
+    RAISE NOTICE '  ✓ 4-person room support';
+    RAISE NOTICE '========================================';
+END $$;
+
+

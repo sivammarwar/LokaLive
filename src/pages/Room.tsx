@@ -260,160 +260,8 @@ export default function Room() {
     [myMembershipTier, fullscreenUserId, userId]
   );
 
-  // ============================================
-// Room.tsx Part 3/12 - Fetch User Data & Initialize Media
-// ✅ FIXED: Better media initialization
-// ============================================
+  const [leavingUserIds, setLeavingUserIds] = useState<Set<string>>(new Set());
 
-  // Fetch user membership and diamond balance
-  useEffect(() => {
-    const fetchUserData = async () => {
-      if (!userId) return;
-      
-      const { data, error } = await supabase
-        .from('users')
-        .select('membership_tier, diamonds')
-        .eq('id', userId)
-        .single();
-      
-      if (error) {
-        console.error('❌ Error fetching user data:', error);
-        return;
-      }
-      
-      if (data) {
-        setMyMembershipTier(data.membership_tier as MembershipTier);
-        await refreshDiamonds(userId);
-        console.log('✅ User data loaded:', data.membership_tier);
-      }
-    };
-    
-    fetchUserData();
-  }, [userId, refreshDiamonds]);
-
-  // ============================================
-  // ✅ Initialize Media with Better Error Handling
-  // ============================================
-  useEffect(() => {
-    if (!userId) {
-      navigate('/');
-      return;
-    }
-
-    mountedRef.current = true;
-    
-    const initMedia = async () => {
-      try {
-        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-        console.log('📹 Initializing media...', { isMobile });
-        
-        const constraints = {
-          video: isMobile ? {
-            width: { ideal: 640, max: 1280 },
-            height: { ideal: 480, max: 720 },
-            facingMode: 'user',
-            frameRate: { ideal: 24, max: 30 },
-          } : {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: 'user',
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: isMobile ? 16000 : 48000,
-          },
-        };
-        
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        
-        if (!mountedRef.current) {
-          console.log('⚠️ Component unmounted during media init, cleaning up');
-          stream.getTracks().forEach(track => track.stop());
-          return;
-        }
-        
-        // Verify tracks are active
-        const videoTrack = stream.getVideoTracks()[0];
-        const audioTrack = stream.getAudioTracks()[0];
-        
-        if (!videoTrack || !audioTrack) {
-          throw new Error('Missing video or audio track');
-        }
-        
-        console.log('✅ Media tracks obtained:', {
-          video: videoTrack.label,
-          audio: audioTrack.label,
-          videoState: videoTrack.readyState,
-          audioState: audioTrack.readyState
-        });
-        
-        setLocalStream(stream);
-        setIsMediaReady(true);
-        
-        // Monitor track states
-        videoTrack.onended = () => {
-          console.warn('⚠️ Video track ended unexpectedly');
-          toast.warning('Camera disconnected');
-        };
-        
-        audioTrack.onended = () => {
-          console.warn('⚠️ Audio track ended unexpectedly');
-          toast.warning('Microphone disconnected');
-        };
-        
-      } catch (error: any) {
-        console.error('❌ Media error:', error);
-        
-        if (!mountedRef.current) return;
-        
-        // Better error messages
-        if (error.name === 'NotAllowedError') {
-          toast.error('Camera/microphone permission denied. Please allow access.');
-        } else if (error.name === 'NotFoundError') {
-          toast.error('No camera or microphone found');
-        } else if (error.name === 'NotReadableError') {
-          toast.error('Camera/microphone is already in use by another application');
-        } else {
-          // Fallback to basic constraints
-          try {
-            console.log('🔄 Trying fallback constraints...');
-            const fallbackStream = await navigator.mediaDevices.getUserMedia({
-              video: { facingMode: 'user' },
-              audio: true,
-            });
-            
-            if (mountedRef.current) {
-              setLocalStream(fallbackStream);
-              setIsMediaReady(true);
-              toast.success('Camera connected with basic settings');
-            } else {
-              fallbackStream.getTracks().forEach(track => track.stop());
-            }
-          } catch (fallbackError) {
-            if (mountedRef.current) {
-              toast.error('Could not access camera/microphone. Please check permissions.');
-            }
-          }
-        }
-      }
-    };
-    
-    initMedia();
-
-    // Cleanup
-    return () => {
-      console.log('🧹 Cleaning up media stream');
-      mountedRef.current = false;
-      if (localStream) {
-        localStream.getTracks().forEach(track => {
-          track.stop();
-          console.log('🛑 Stopped track:', track.kind);
-        });
-      }
-    };
-  }, [userId, navigate]);
 
   // ============================================
 // Room.tsx Part 3/12 - Fetch User Data & Initialize Media
@@ -569,150 +417,348 @@ export default function Room() {
       }
     };
   }, [userId, navigate]);
+
+  // ============================================
+// Room.tsx Part 3/12 - Fetch User Data & Initialize Media
+// ✅ FIXED: Better media initialization
+// ============================================
+
+  // Fetch user membership and diamond balance
+  useEffect(() => {
+    const fetchUserData = async () => {
+      if (!userId) return;
+      
+      const { data, error } = await supabase
+        .from('users')
+        .select('membership_tier, diamonds')
+        .eq('id', userId)
+        .single();
+      
+      if (error) {
+        console.error('❌ Error fetching user data:', error);
+        return;
+      }
+      
+      if (data) {
+        setMyMembershipTier(data.membership_tier as MembershipTier);
+        await refreshDiamonds(userId);
+        console.log('✅ User data loaded:', data.membership_tier);
+      }
+    };
+    
+    fetchUserData();
+  }, [userId, refreshDiamonds]);
+
+  // ============================================
+  // ✅ Initialize Media with Better Error Handling
+  // ============================================
+  useEffect(() => {
+    if (!userId) {
+      navigate('/');
+      return;
+    }
+
+    mountedRef.current = true;
+    
+    const initMedia = async () => {
+      try {
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        console.log('📹 Initializing media...', { isMobile });
+        
+        const constraints = {
+          video: isMobile ? {
+            width: { ideal: 640, max: 1280 },
+            height: { ideal: 480, max: 720 },
+            facingMode: 'user',
+            frameRate: { ideal: 24, max: 30 },
+          } : {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: 'user',
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: isMobile ? 16000 : 48000,
+          },
+        };
+        
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        
+        if (!mountedRef.current) {
+          console.log('⚠️ Component unmounted during media init, cleaning up');
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        
+        // Verify tracks are active
+        const videoTrack = stream.getVideoTracks()[0];
+        const audioTrack = stream.getAudioTracks()[0];
+        
+        if (!videoTrack || !audioTrack) {
+          throw new Error('Missing video or audio track');
+        }
+        
+        console.log('✅ Media tracks obtained:', {
+          video: videoTrack.label,
+          audio: audioTrack.label,
+          videoState: videoTrack.readyState,
+          audioState: audioTrack.readyState
+        });
+        
+        setLocalStream(stream);
+        setIsMediaReady(true);
+        
+        // Monitor track states
+        videoTrack.onended = () => {
+          console.warn('⚠️ Video track ended unexpectedly');
+          toast.warning('Camera disconnected');
+        };
+        
+        audioTrack.onended = () => {
+          console.warn('⚠️ Audio track ended unexpectedly');
+          toast.warning('Microphone disconnected');
+        };
+        
+      } catch (error: any) {
+        console.error('❌ Media error:', error);
+        
+        if (!mountedRef.current) return;
+        
+        // Better error messages
+        if (error.name === 'NotAllowedError') {
+          toast.error('Camera/microphone permission denied. Please allow access.');
+        } else if (error.name === 'NotFoundError') {
+          toast.error('No camera or microphone found');
+        } else if (error.name === 'NotReadableError') {
+          toast.error('Camera/microphone is already in use by another application');
+        } else {
+          // Fallback to basic constraints
+          try {
+            console.log('🔄 Trying fallback constraints...');
+            const fallbackStream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: 'user' },
+              audio: true,
+            });
+            
+            if (mountedRef.current) {
+              setLocalStream(fallbackStream);
+              setIsMediaReady(true);
+              toast.success('Camera connected with basic settings');
+            } else {
+              fallbackStream.getTracks().forEach(track => track.stop());
+            }
+          } catch (fallbackError) {
+            if (mountedRef.current) {
+              toast.error('Could not access camera/microphone. Please check permissions.');
+            }
+          }
+        }
+      }
+    };
+    
+    initMedia();
+
+    // Cleanup
+    return () => {
+      console.log('🧹 Cleaning up media stream');
+      mountedRef.current = false;
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          track.stop();
+          console.log('🛑 Stopped track:', track.kind);
+        });
+      }
+    };
+  }, [userId, navigate]);
+
+
+  useEffect(() => {
+    if (!userId) return;
+  
+    const diamondChannel = supabase
+      .channel(`diamond-updates-${userId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'diamond_transactions',
+        filter: `user_id=eq.${userId}`,
+      }, (payload) => {
+        const transaction = payload.new as any;
+        
+        if (transaction.type === 'bet_win' && transaction.status === 'completed') {
+          // Winner notification
+          toast.success(`🏆 You won ${transaction.amount} diamonds!`, {
+            duration: 5000,
+          });
+          refreshDiamonds(userId);
+        } else if (transaction.type === 'bet_refund' && transaction.status === 'completed') {
+          // Refund notification
+          toast.info(`💎 Bet refunded: ${transaction.amount} diamonds`, {
+            duration: 4000,
+          });
+          refreshDiamonds(userId);
+        }
+      })
+      .subscribe();
+  
+    return () => {
+      supabase.removeChannel(diamondChannel);
+    };
+  }, [userId, refreshDiamonds]);
+
 
 
   // ✅ FIX: Load room data and participants
-useEffect(() => {
-  if (!roomId || !userId) return;
-  
-  let mounted = true;
-  
-  const fetchRoomData = async () => {
-    try {
-      console.log('📊 [Room] Loading room data...');
-      
-      // Load room details
-      const { data: room, error: roomError } = await supabase
-        .from('rooms')
-        .select('*')
-        .eq('id', roomId)
-        .single();
-      
-      if (roomError) {
-        console.error('❌ [Room] Error loading room:', roomError);
-        return;
-      }
-      
-      if (room && mounted) {
-        setRoomData(room);
-        console.log('✅ [Room] Room loaded:', room);
-      }
-      
-      // ✅ CRITICAL FIX: Load participants with JOIN to get user data
-      const { data: participantsData, error: participantsError } = await supabase
-        .from('room_participants')
-        .select(`
-          user_id,
-          joined_at,
-          users!inner (
-            display_name,
-            membership_tier,
-            diamonds
-          )
-        `)
-        .eq('room_id', roomId)
-        .is('left_at', null);
-      
-      if (participantsError) {
-        console.error('❌ [Room] Error loading participants:', participantsError);
-        return;
-      }
-      
-      console.log('📥 [Room] Raw participants data:', participantsData);
-      
-      if (participantsData && mounted) {
-        const participantList: Participant[] = participantsData.map(p => {
-          // Handle both possible data structures
-          const userData = Array.isArray(p.users) ? p.users[0] : p.users;
+  useEffect(() => {
+    if (!roomId || !userId) return;
+    
+    let mounted = true;
+    
+    const fetchRoomData = async () => {
+      try {
+        console.log('📊 [Room] Loading room data...');
+        
+        const { data: room, error: roomError } = await supabase
+          .from('rooms')
+          .select('*')
+          .eq('id', roomId)
+          .single();
+        
+        if (roomError) {
+          console.error('❌ [Room] Error loading room:', roomError);
+          return;
+        }
+        
+        if (room && mounted) {
+          setRoomData(room);
+          console.log('✅ [Room] Room loaded:', room);
+        }
+        
+        const { data: participantsData, error: participantsError } = await supabase
+          .from('room_participants')
+          .select(`
+            user_id,
+            joined_at,
+            users!inner (
+              display_name,
+              membership_tier,
+              diamonds
+            )
+          `)
+          .eq('room_id', roomId)
+          .is('left_at', null);
+        
+        if (participantsError) {
+          console.error('❌ [Room] Error loading participants:', participantsError);
+          return;
+        }
+        
+        if (participantsData && mounted) {
+          const participantList: Participant[] = participantsData.map(p => {
+            const userData = Array.isArray(p.users) ? p.users[0] : p.users;
+            
+            return {
+              id: p.user_id,
+              user_id: p.user_id,
+              display_name: userData?.display_name || 'Unknown User',
+              membership_tier: (userData?.membership_tier as MembershipTier) || 'free',
+              diamonds: userData?.diamonds || 0,
+            };
+          });
           
-          return {
-            id: p.user_id,
-            user_id: p.user_id,
-            display_name: userData?.display_name || 'Unknown User',
-            membership_tier: (userData?.membership_tier as MembershipTier) || 'free',
-            diamonds: userData?.diamonds || 0,
+          setParticipants(participantList);
+          console.log('✅ [Room] Participants loaded:', participantList.map(p => ({
+            id: p.user_id.slice(0, 8),
+            name: p.display_name
+          })));
+        }
+        
+        if (mounted) {
+          setIsRoomReady(true);
+          setIsLoading(false);
+        }
+        
+      } catch (error) {
+        console.error('❌ [Room] Error in fetchRoomData:', error);
+        if (mounted) setIsLoading(false);
+      }
+    };
+    
+    fetchRoomData();
+    
+    // ✅ IMPROVED: Subscribe to participant changes
+    const participantChannel = supabase
+      .channel(`room-participants-${roomId}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'room_participants',
+        filter: `room_id=eq.${roomId}`,
+      }, async (payload) => {
+        console.log('👤 [Room] New participant joined:', payload.new.user_id);
+        
+        const { data: newUser } = await supabase
+          .from('users')
+          .select('display_name, membership_tier, diamonds')
+          .eq('id', payload.new.user_id)
+          .single();
+        
+        if (newUser && mounted) {
+          const newParticipant: Participant = {
+            id: payload.new.user_id,
+            user_id: payload.new.user_id,
+            display_name: newUser.display_name || 'Unknown',
+            membership_tier: (newUser.membership_tier as MembershipTier) || 'free',
+            diamonds: newUser.diamonds || 0,
           };
-        });
-        
-        setParticipants(participantList);
-        console.log('✅ [Room] Participants loaded:', participantList.map(p => ({
-          id: p.user_id.slice(0, 8),
-          name: p.display_name
-        })));
-      }
-      
-      if (mounted) {
-        setIsRoomReady(true);
-        setIsLoading(false);
-      }
-      
-    } catch (error) {
-      console.error('❌ [Room] Error in fetchRoomData:', error);
-      if (mounted) setIsLoading(false);
-    }
-  };
-  
-  fetchRoomData();
-  
-  // ✅ Subscribe to new participants joining
-  const participantChannel = supabase
-    .channel(`room-participants-${roomId}`)
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'room_participants',
-      filter: `room_id=eq.${roomId}`,
-    }, async (payload) => {
-      console.log('👤 [Room] New participant joined:', payload.new.user_id);
-      
-      // Fetch the new user's data
-      const { data: newUser } = await supabase
-        .from('users')
-        .select('display_name, membership_tier, diamonds')
-        .eq('id', payload.new.user_id)
-        .single();
-      
-      if (newUser && mounted) {
-        const newParticipant: Participant = {
-          id: payload.new.user_id,
-          user_id: payload.new.user_id,
-          display_name: newUser.display_name || 'Unknown',
-          membership_tier: (newUser.membership_tier as MembershipTier) || 'free',
-          diamonds: newUser.diamonds || 0,
-        };
-        
-        setParticipants(prev => {
-          // Don't add if already exists
-          if (prev.some(p => p.user_id === newParticipant.user_id)) {
-            return prev;
+          
+          setParticipants(prev => {
+            if (prev.some(p => p.user_id === newParticipant.user_id)) {
+              return prev;
+            }
+            return [...prev, newParticipant];
+          });
+          
+          console.log('✅ [Room] Added new participant:', newParticipant.display_name);
+        }
+      })
+      .on('postgres_changes', {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'room_participants',
+        filter: `room_id=eq.${roomId}`,
+      }, (payload) => {
+        if (payload.new.left_at && mounted) {
+          const leftUserId = payload.new.user_id;
+          console.log('👋 [Room] Participant left:', leftUserId);
+          
+          // ✅ NEW: Mark user as leaving (show loading state)
+          if (leftUserId !== userId) {
+            setLeavingUserIds(prev => new Set(prev).add(leftUserId));
+            
+            // Remove from participants after a delay
+            setTimeout(() => {
+              setParticipants(prev => 
+                prev.filter(p => p.user_id !== leftUserId)
+              );
+              setLeavingUserIds(prev => {
+                const next = new Set(prev);
+                next.delete(leftUserId);
+                return next;
+              });
+            }, 500);
           }
-          return [...prev, newParticipant];
-        });
-        
-        console.log('✅ [Room] Added new participant:', newParticipant.display_name);
-      }
-    })
-    .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'room_participants',
-      filter: `room_id=eq.${roomId}`,
-    }, (payload) => {
-      // Handle participant leaving
-      if (payload.new.left_at && mounted) {
-        console.log('👋 [Room] Participant left:', payload.new.user_id);
-        setParticipants(prev => 
-          prev.filter(p => p.user_id !== payload.new.user_id)
-        );
-      }
-    })
-    .subscribe();
-  
-  return () => {
-    mounted = false;
-    supabase.removeChannel(participantChannel);
-  };
-}, [roomId, userId]);
+        }
+      })
+      .subscribe();
+    
+    return () => {
+      mounted = false;
+      supabase.removeChannel(participantChannel);
+    };
+  }, [roomId, userId]);
 
   // ============================================
 // Room.tsx Part 5/12 - Chess & Kick Vote Subscriptions
@@ -1022,193 +1068,297 @@ useEffect(() => {
   }, [localStream, announceLeave, roomId, userId, navigate]);
 
   // ✅ Next Room - Better error handling
-  const handleNextRoom = useCallback(async () => {
-    if (!roomData || roomData.room_type !== 'public') {
-      toast.error('Next room is only available for public rooms');
+// ============================================
+// ✅ FIXED handleNextRoom Function
+// Replace your current handleNextRoom with this
+// ============================================
+
+// ============================================
+// ✅ FIXED handleNextRoom with Better Validation
+// Replace your current handleNextRoom with this
+// ============================================
+
+// ============================================
+// ✅ FIXED handleNextRoom Function
+// Replace your current handleNextRoom with this
+// ============================================
+
+// ============================================
+// ✅ IMPROVED handleNextRoom with WebRTC Cleanup
+// Replace your current handleNextRoom
+// ============================================
+
+const handleNextRoom = useCallback(async () => {
+  console.log('🚪 [Next Room] Button clicked');
+  
+  // Validation
+  if (!roomData || roomData.room_type !== 'public') {
+    toast.error('Next room is only available for public rooms');
+    return;
+  }
+  
+  if (!userId) {
+    toast.error('User ID not found');
+    return;
+  }
+  
+  // Cooldown check
+  if (nextRoomStatus.isSearching) {
+    console.log('⚠️ [Next Room] Already searching, ignoring click');
+    return;
+  }
+  
+  // Gender validation
+  let userGender = gender;
+  
+  if (!userGender || userGender === 'other') {
+    try {
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('gender')
+        .eq('id', userId)
+        .single();
+      
+      if (userError || !userData || userData.gender === 'other' || !userData.gender) {
+        toast.error('Please set your gender to Male or Female');
+        navigate('/profile');
+        return;
+      }
+      
+      userGender = userData.gender as 'male' | 'female';
+    } catch (err) {
+      toast.error('Error loading user data');
       return;
+    }
+  }
+  
+  if (userGender !== 'male' && userGender !== 'female') {
+    toast.error('Please set your gender to Male or Female');
+    navigate('/profile');
+    return;
+  }
+
+  try {
+    // ============================================
+    // STEP 1: COMPLETE CLEANUP (Critical Fix)
+    // ============================================
+    setNextRoomStatus({ 
+      isSearching: true, 
+      message: 'Leaving current room...' 
+    });
+    
+    console.log('🧹 [Next Room] Step 1: Complete cleanup');
+    
+    // ✅ FIX #1: Stop ALL media tracks
+    if (localStream) {
+      localStream.getTracks().forEach(track => {
+        track.stop();
+        console.log('🛑 Stopped track:', track.kind, track.id);
+      });
+      setLocalStream(null); // ✅ Clear state
     }
     
-    if (!userId || !gender) {
-      toast.error('Missing user information');
-      return;
+    // ✅ FIX #2: Close ALL peer connections
+    if (peerConnectionsRef?.current) {
+      console.log('🔌 Closing peer connections:', peerConnectionsRef.current.size);
+      peerConnectionsRef.current.forEach((pc, peerId) => {
+        console.log('  Closing connection to:', peerId.slice(0, 8));
+        pc.close();
+      });
+      peerConnectionsRef.current.clear();
+    }
+    
+    // ✅ FIX #3: Signal leave via WebRTC (with timeout)
+    try {
+      await Promise.race([
+        announceLeave(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Announce timeout')), 1000)
+        )
+      ]);
+      console.log('✅ WebRTC leave announced');
+    } catch (err) {
+      console.warn('⚠️ Announce leave timeout (continuing):', err);
+    }
+    
+    // ✅ FIX #4: Database cleanup with retry
+    let leaveAttempts = 0;
+    const maxAttempts = 2;
+    
+    while (leaveAttempts < maxAttempts) {
+      const { error: leaveError } = await supabase
+        .from('room_participants')
+        .update({ left_at: new Date().toISOString() })
+        .eq('room_id', roomId)
+        .eq('user_id', userId)
+        .is('left_at', null);
+      
+      if (!leaveError) {
+        console.log('✅ Database leave successful');
+        break;
+      }
+      
+      leaveAttempts++;
+      console.warn(`⚠️ Leave attempt ${leaveAttempts} failed:`, leaveError);
+      
+      if (leaveAttempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+    }
+    
+    // ✅ FIX #5: Longer delay for cleanup to propagate
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // ============================================
+    // STEP 2: Find new room with validation
+    // ============================================
+    setNextRoomStatus({ 
+      isSearching: true, 
+      message: 'Finding match...' 
+    });
+    
+    console.log('🔍 [Next Room] Step 2: Finding room');
+    
+    const { data: matchData, error: matchError } = await supabase.rpc(
+      'find_compatible_room_simple',
+      {
+        p_user_id: userId,
+        p_user_gender: userGender,
+        p_room_size: roomData.room_size
+      }
+    );
+
+    if (matchError) {
+      console.error('❌ Match error:', matchError);
+      throw new Error(`Matchmaking failed: ${matchError.message}`);
     }
 
-    try {
-      setNextRoomStatus({ 
-        isSearching: true, 
-        message: 'Leaving current room...' 
-      });
-      
-      console.log('🚪 Starting Next Room process...');
-      
-      // STEP 1: Leave current room
-      console.log('📤 Step 1: Leaving current room');
-      
-      if (localStream) {
-        localStream.getTracks().forEach(track => {
-          track.stop();
-          console.log('  🛑 Stopped', track.kind, 'track');
-        });
-      }
-      
-      const leavePromise = announceLeave().catch(err => {
-        console.warn('  ⚠️ WebRTC leave warning:', err);
-      });
-      
-      const dbPromise = supabase.rpc('leave_all_user_rooms', {
+    if (!matchData || matchData.length === 0) {
+      throw new Error('No room data returned');
+    }
+
+    const result = matchData[0];
+    const newRoomId = result.matched_room_id;
+    const isNewRoom = result.is_new_room;
+
+    if (!newRoomId) {
+      throw new Error('Invalid room ID');
+    }
+
+    console.log(`✅ [Next Room] ${isNewRoom ? 'Created' : 'Found'} room:`, newRoomId);
+    
+    // ============================================
+    // STEP 3: Join new room with validation
+    // ============================================
+    setNextRoomStatus({ 
+      isSearching: true, 
+      message: 'Joining room...' 
+    });
+    
+    console.log('🚪 [Next Room] Step 3: Joining');
+    
+    // ✅ FIX #6: Verify room before joining
+    const { data: roomCheck, error: roomCheckError } = await supabase
+      .from('rooms')
+      .select('id, is_active, room_size')
+      .eq('id', newRoomId)
+      .single();
+    
+    if (roomCheckError || !roomCheck || !roomCheck.is_active) {
+      console.error('❌ Room validation failed:', roomCheckError);
+      throw new Error('Room no longer available');
+    }
+    
+    // Now join
+    const { data: joinData, error: joinError } = await supabase.rpc(
+      'join_room_if_available',
+      {
+        p_room_id: newRoomId,
         p_user_id: userId
-      });
-      
-      await Promise.race([
-        Promise.all([leavePromise, dbPromise]),
-        new Promise(resolve => setTimeout(resolve, 2000))
-      ]);
-      
-      console.log('  ✅ Left current room');
-      
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // STEP 2: Find or create new room
-      setNextRoomStatus({ 
-        isSearching: true, 
-        message: roomData.room_size === 4 
-          ? 'Finding 4-person room...' 
-          : 'Finding match...'
-      });
-      
-      console.log('🔍 Step 2: Finding compatible room');
-      
-      const { data: matchData, error: matchError } = await supabase.rpc(
-        'find_compatible_room_simple',
-        {
-          p_user_id: userId,
-          p_user_gender: gender as 'male' | 'female',
-          p_room_size: roomData.room_size
-        }
-      );
-
-      if (matchError) {
-        console.error('❌ Matchmaking error:', matchError);
-        throw new Error(`Matchmaking failed: ${matchError.message}`);
       }
+    );
 
-      if (!matchData || matchData.length === 0) {
-        throw new Error('No room data returned from matchmaking');
+    if (joinError) {
+      console.error('❌ Join error:', joinError);
+      throw new Error('Failed to join room');
+    }
+
+    const joinResult = joinData as { success: boolean; error?: string; message?: string };
+
+    if (!joinResult.success && !joinResult.message?.includes('already')) {
+      if (joinResult.error === 'room_full') {
+        console.log('⚠️ Room full, retrying...');
+        // Retry with small delay
+        await new Promise(resolve => setTimeout(resolve, 300));
+        return handleNextRoom(); // Recursive retry
       }
+      throw new Error(joinResult.message || 'Failed to join');
+    }
 
-      const result = matchData[0];
-      const newRoomId = result.matched_room_id;
-      const isNewRoom = result.is_new_room;
-
-      if (!newRoomId) {
-        throw new Error('Invalid room ID returned');
-      }
-
-      console.log(`  ✅ ${isNewRoom ? 'Created' : 'Found'} room:`, newRoomId);
-      
-      // STEP 3: Join the new room
-      setNextRoomStatus({ 
-        isSearching: true, 
-        message: 'Joining room...' 
-      });
-      
-      console.log('🚪 Step 3: Joining room');
-      
-      let joinSuccess = false;
-      const maxAttempts = 3;
-      
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        console.log(`  Attempt ${attempt}/${maxAttempts}`);
-        
-        const { data: joinData, error: joinError } = await supabase.rpc(
-          'join_room_if_available',
-          {
-            p_room_id: newRoomId,
-            p_user_id: userId
-          }
-        );
-
-        if (joinError) {
-          console.error('  ❌ Join error:', joinError);
-          if (attempt === maxAttempts) {
-            throw new Error('Failed to join room after multiple attempts');
-          }
-          await new Promise(resolve => setTimeout(resolve, 500));
-          continue;
-        }
-
-        const joinResult = joinData as {
-          success: boolean;
-          error?: string;
-          message?: string;
-        };
-
-        if (joinResult.success || joinResult.message?.includes('already')) {
-          joinSuccess = true;
-          console.log('  ✅ Successfully joined');
-          break;
-        }
-
-        if (joinResult.error === 'room_full') {
-          console.log('  ⚠️ Room full, retrying matchmaking...');
-          setNextRoomStatus({ isSearching: false, message: '' });
-          setTimeout(() => handleNextRoom(), 500);
-          return;
-        }
-
-        if (attempt === maxAttempts) {
-          throw new Error(joinResult.message || 'Failed to join room');
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-
-      if (!joinSuccess) {
-        throw new Error('Could not join room');
-      }
-
-      // STEP 4: Success - Navigate
-      console.log('✅ Successfully joined new room');
-      
-      toast.success(
-        isNewRoom 
-          ? (roomData.room_size === 4 
-              ? 'Created 4-person room! Waiting for others...' 
-              : 'Created room! Waiting for match...')
-          : (roomData.room_size === 4
-              ? 'Joined 4-person room!'
-              : 'Match found!')
-      );
-      
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      navigate(`/room/${newRoomId}`, { replace: true });
-      
-    } catch (error: any) {
-      console.error('❌ Next room error:', error);
-      
-      let errorMessage = 'Failed to find next room';
-      
-      if (error.message?.includes('gender')) {
-        errorMessage = 'Please set your gender to use this feature';
-      } else if (error.message?.includes('full')) {
-        errorMessage = 'Room filled up, please try again';
-      } else if (error.message?.includes('network')) {
-        errorMessage = 'Connection error, please check your internet';
-      } else if (error.message) {
-        errorMessage = error.message;
-      }
-      
-      toast.error(errorMessage);
-      
-      console.log('🔄 Falling back to create room page');
-      await new Promise(resolve => setTimeout(resolve, 500));
-      navigate('/create-room', { replace: true });
-      
-    } finally {
+    // ============================================
+    // STEP 4: Clean state and navigate
+    // ============================================
+    console.log('✅ [Next Room] Success, navigating...');
+    
+    toast.success(
+      isNewRoom 
+        ? 'Waiting for match...'
+        : 'Match found!'
+    );
+    
+    // ✅ FIX #7: Clear ALL state
+    setActiveChessGame(null);
+    setFullscreenUserId(null);
+    setPendingChessInvite(null);
+    setActiveKickVote(null);
+    setShowKickVoteModal(false);
+    
+    // Small delay
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    // ✅ FIX #8: Force page refresh on navigation to ensure clean state
+    window.location.href = `/room/${newRoomId}`;
+    
+  } catch (error: any) {
+    console.error('❌ [Next Room] Error:', error);
+    
+    // Error handling
+    if (error.message?.includes('gender')) {
+      toast.error('Please update your gender in profile');
+      navigate('/profile');
+    } else if (error.message?.includes('no longer available')) {
+      toast.error('Room was closed. Finding another...');
+      // Auto-retry once
+      setTimeout(() => {
+        setNextRoomStatus({ isSearching: false, message: '' });
+        handleNextRoom();
+      }, 500);
+      return;
+    } else {
+      toast.error('Failed to find next room');
+    }
+    
+    // Fallback
+    await new Promise(resolve => setTimeout(resolve, 500));
+    navigate('/create-room', { replace: true });
+    
+  } finally {
+    // Only clear loading if we're not retrying
+    if (!nextRoomStatus.message.includes('Retrying')) {
       setNextRoomStatus({ isSearching: false, message: '' });
     }
-  }, [roomData, userId, gender, localStream, announceLeave, navigate]);
+  }
+}, [
+  roomData, 
+  userId, 
+  gender, 
+  localStream, 
+  announceLeave, 
+  roomId, 
+  navigate,
+  nextRoomStatus.isSearching,
+  peerConnectionsRef // ✅ Include peer connections ref
+]);
   // ============================================
 // Room.tsx Part 8/12 - Kick Vote Handlers
 // ✅ Using useCallback for stability
@@ -1382,48 +1532,85 @@ useEffect(() => {
   const acceptChessInvite = useCallback(async () => {
     if (!pendingChessInvite) return;
     
-    // Check if it's a bet match and deduct diamonds
-    if (pendingChessInvite.isBetMatch && pendingChessInvite.betAmount) {
-      if (diamonds < pendingChessInvite.betAmount) {
-        toast.error(`You don't have enough diamonds. You have ${diamonds}, need ${pendingChessInvite.betAmount}`);
+    try {
+      // ✅ FIX: Check if it's a bet match and use atomic deduction
+      if (pendingChessInvite.isBetMatch && pendingChessInvite.betAmount) {
+        // Validate balance first
+        if (diamonds < pendingChessInvite.betAmount) {
+          toast.error(`You don't have enough diamonds. You have ${diamonds}, need ${pendingChessInvite.betAmount}`);
+          return;
+        }
+        
+        console.log('💎 Processing bet match...');
+        
+        // ✅ USE ATOMIC FUNCTION: Deduct from both players at once
+        const { data: deductResult, error: deductError } = await supabase.rpc(
+          'deduct_bet_from_both_players',
+          {
+            p_game_id: pendingChessInvite.gameId,
+            p_player1_id: pendingChessInvite.inviterId,
+            p_player2_id: userId!,
+            p_bet_amount: pendingChessInvite.betAmount
+          }
+        );
+        
+        if (deductError || !deductResult) {
+          console.error('❌ Bet deduction error:', deductError);
+          toast.error('Failed to process bet');
+          return;
+        }
+        
+        const result = deductResult as { success: boolean; error?: string };
+        
+        if (!result.success) {
+          console.error('❌ Bet deduction failed:', result.error);
+          toast.error(result.error || 'Failed to lock bet');
+          return;
+        }
+        
+        console.log('✅ Bet locked successfully');
+        toast.success(`Bet locked! ${pendingChessInvite.betAmount} diamonds deducted from both players`);
+        
+        // Refresh your diamond balance
+        await refreshDiamonds(userId!);
+      }
+      
+      // ✅ Update game status to active
+      const { error: gameError } = await supabase
+        .from('chess_games')
+        .update({ 
+          status: 'active',
+          // bet_status is already 'locked' by the function above
+        })
+        .eq('id', pendingChessInvite.gameId);
+      
+      if (gameError) {
+        console.error('❌ Error accepting chess invite:', gameError);
+        toast.error('Failed to accept chess invitation');
+        
+        // ✅ If game activation fails, refund the bet
+        if (pendingChessInvite.isBetMatch && pendingChessInvite.betAmount) {
+          await supabase.rpc('refund_bet_to_both_players', {
+            p_game_id: pendingChessInvite.gameId
+          });
+          toast.info('Bet refunded due to error');
+        }
         return;
       }
       
-      const deductSuccess = await deductBetFromPlayers(
-        pendingChessInvite.gameId,
-        pendingChessInvite.inviterId,
-        userId!,
-        pendingChessInvite.betAmount
+      setPendingChessInvite(null);
+      toast.success(
+        pendingChessInvite.isBetMatch 
+          ? 'Bet match accepted! Creating chess room...' 
+          : 'Creating chess room...'
       );
       
-      if (!deductSuccess) {
-        toast.error('Failed to process bet');
-        return;
-      }
-    }
-    
-    // Update game status to active
-    const { error } = await supabase
-      .from('chess_games')
-      .update({ 
-        status: 'active',
-        bet_status: pendingChessInvite.isBetMatch ? 'locked' : undefined,
-      })
-      .eq('id', pendingChessInvite.gameId);
-    
-    if (error) {
+    } catch (error) {
       console.error('❌ Error accepting chess invite:', error);
-      toast.error('Failed to accept chess invitation');
-      return;
+      toast.error('Failed to accept invitation');
     }
-    
-    setPendingChessInvite(null);
-    toast.info(
-      pendingChessInvite.isBetMatch 
-        ? 'Bet locked! Creating chess room...' 
-        : 'Creating chess room...'
-    );
-  }, [pendingChessInvite, diamonds, userId]);
+  }, [pendingChessInvite, diamonds, userId, refreshDiamonds]);
+  
 
   // Decline chess invitation
   const declineChessInvite = useCallback(async () => {
@@ -1443,68 +1630,7 @@ useEffect(() => {
 // ============================================
 
   // Deduct bet diamonds from both players
-  const deductBetFromPlayers = useCallback(async (
-    gameId: string, 
-    player1Id: string, 
-    player2Id: string, 
-    betAmount: number
-  ): Promise<boolean> => {
-    try {
-      // Deduct from player 1
-      const { error: error1 } = await supabase.rpc('deduct_diamonds', { 
-        p_user_id: player1Id, 
-        p_amount: betAmount 
-      });
-      
-      if (error1) {
-        console.error('❌ Failed to deduct from player 1:', error1);
-        return false;
-      }
-      
-      // Deduct from player 2
-      const { error: error2 } = await supabase.rpc('deduct_diamonds', { 
-        p_user_id: player2Id, 
-        p_amount: betAmount 
-      });
-      
-      if (error2) {
-        console.error('❌ Failed to deduct from player 2:', error2);
-        // Refund player 1
-        await supabase.rpc('add_diamonds', { 
-          p_user_id: player1Id, 
-          p_amount: betAmount 
-        });
-        return false;
-      }
-      
-      // Log transactions
-      await supabase.from('diamond_transactions').insert([
-        { 
-          user_id: player1Id, 
-          type: 'bet_deduct', 
-          amount: -betAmount, 
-          description: `Chess bet deducted: ${betAmount} diamonds`, 
-          status: 'completed' 
-        },
-        { 
-          user_id: player2Id, 
-          type: 'bet_deduct', 
-          amount: -betAmount, 
-          description: `Chess bet deducted: ${betAmount} diamonds`, 
-          status: 'completed' 
-        },
-      ]);
-      
-      // Refresh user's diamond count
-      if (userId) await refreshDiamonds(userId);
-      
-      console.log('✅ Bet deducted successfully from both players');
-      return true;
-    } catch (error) {
-      console.error('❌ Error deducting bet diamonds:', error);
-      return false;
-    }
-  }, [userId, refreshDiamonds]);
+  
 
   // Create a separate room for chess game
   const createChessRoom = useCallback(async (
@@ -1517,7 +1643,31 @@ useEffect(() => {
     console.log('♟️ Creating chess room...');
     
     try {
-      // ✅ FIX 1: Check if chess room already exists for this game
+      // ✅ VALIDATION: Check game exists and bet is properly locked
+      if (isBetMatch && betAmount) {
+        const { data: gameData, error: gameError } = await supabase
+          .from('chess_games')
+          .select('bet_status, is_bet_match, bet_amount')
+          .eq('id', gameId)
+          .single();
+        
+        if (gameError || !gameData) {
+          console.error('❌ Failed to validate game:', gameError);
+          toast.error('Failed to create chess room');
+          return;
+        }
+        
+        // Ensure bet is locked before proceeding
+        if (gameData.bet_status !== 'locked') {
+          console.error('❌ Bet not locked:', gameData.bet_status);
+          toast.error('Bet was not properly locked. Contact support.');
+          return;
+        }
+        
+        console.log('✅ Bet validation passed');
+      }
+      
+      // ✅ Check if chess room already exists
       const { data: existingGame } = await supabase
         .from('chess_games')
         .select('chess_room_id')
@@ -1527,7 +1677,6 @@ useEffect(() => {
       let chessRoomId: string;
   
       if (existingGame?.chess_room_id) {
-        // Room already exists, use it
         console.log('♻️ Using existing chess room:', existingGame.chess_room_id);
         chessRoomId = existingGame.chess_room_id;
       } else {
@@ -1552,14 +1701,14 @@ useEffect(() => {
         chessRoomId = newRoom.id;
         console.log('✅ Chess room created:', chessRoomId);
   
-        // ✅ FIX 2: Update the chess game with the room ID
+        // Update game with room ID
         await supabase
           .from('chess_games')
           .update({ chess_room_id: chessRoomId })
           .eq('id', gameId);
       }
   
-      // ✅ FIX 3: Check existing participants before inserting
+      // Add participants (with duplicate check)
       const { data: existingParticipants } = await supabase
         .from('room_participants')
         .select('user_id')
@@ -1568,7 +1717,6 @@ useEffect(() => {
   
       const existingUserIds = new Set(existingParticipants?.map(p => p.user_id) || []);
       
-      // Only insert participants who aren't already in the room
       const participantsToInsert = [];
       if (!existingUserIds.has(userId!)) {
         participantsToInsert.push({ room_id: chessRoomId, user_id: userId });
@@ -1583,9 +1731,7 @@ useEffect(() => {
           .insert(participantsToInsert);
         
         if (participantError) {
-          console.error('❌ Failed to add participants:', participantError);
-          // Don't fail completely - room might still work
-          console.warn('⚠️ Continuing despite participant error...');
+          console.warn('⚠️ Participant error (continuing):', participantError);
         } else {
           console.log(`✅ Added ${participantsToInsert.length} participants`);
         }
@@ -1593,7 +1739,7 @@ useEffect(() => {
         console.log('✅ All participants already in room');
       }
       
-      // ✅ FIX 4: Broadcast chess room creation
+      // Broadcast chess room creation
       const chessChannel = supabase.channel(`chess-invites-${roomId}`);
       await chessChannel.send({
         type: 'broadcast',
@@ -1610,7 +1756,7 @@ useEffect(() => {
         },
       });
       
-      // ✅ FIX 5: Set active chess game state
+      // Set active chess game state
       setActiveChessGame({
         gameId, 
         myColor: 'white', 
@@ -2016,186 +2162,172 @@ return (
             {/* SLOTS 2-4: REMOTE PARTICIPANTS OR LOADING */}
             {/* ============================================ */}
 
-             {(() => {
-            const maxSlots = (roomData?.room_size || 2) - 1;
-            const slots = [];
-            const remotePeerIds = Array.from(remoteStreams.keys());
-            
-            console.log('🎬 [Render] Remote peers:', remotePeerIds.map(id => ({
-              id: id.slice(0, 8),
-              hasStream: remoteStreams.has(id),
-              participant: participants.find(p => p.user_id === id)?.display_name || 'NOT FOUND'
-            })));
-            
-            for (let i = 0; i < maxSlots; i++) {
-              const peerId = remotePeerIds[i];
-              
-              if (peerId) {
-                // ✅ SHOW REMOTE VIDEO
-                const stream = remoteStreams.get(peerId);
-                const participant = participants.find((p) => p.user_id === peerId);
+              {(() => {
+                const maxSlots = (roomData?.room_size || 2) - 1;
+                const slots = [];
+                const remotePeerIds = Array.from(remoteStreams.keys());
                 
-                // ✅ BETTER NAME FALLBACK: Try to get name from WebRTC peers first
-                let peerName = participant?.display_name;
-                if (!peerName) {
-                  const peerConnection = Array.from(peers.values()).find(p => p.peerId === peerId);
-                  peerName = peerConnection?.peerName || `User ${peerId.slice(0, 8)}`;
-                  console.warn(`⚠️ [Render] No participant data for ${peerId.slice(0, 8)}, using fallback: ${peerName}`);
+                for (let i = 0; i < maxSlots; i++) {
+                  const peerId = remotePeerIds[i];
+                  
+                  if (peerId) {
+                    const stream = remoteStreams.get(peerId);
+                    const participant = participants.find((p) => p.user_id === peerId);
+                    
+                    // ✅ FIXED: Better name fallback without 'peers'
+                    let peerName = participant?.display_name || `User ${peerId.slice(0, 8)}`;
+                    
+                    const peerMembershipTier = participant?.membership_tier || 'free';
+                    const peerStyle = getMembershipStyle(peerMembershipTier);
+                    const peerVideoClasses = getPremiumVideoClasses(peerMembershipTier);
+                    const PeerIcon = peerStyle.icon;
+                    
+                    // ✅ Check if this user is leaving
+                    const isLeaving = leavingUserIds.has(peerId);
+
+                    slots.push(
+                      <div
+                        key={peerId}
+                        className={cn(
+                          "relative overflow-hidden bg-card group",
+                          roomData?.room_size === 4 ? 'aspect-square md:aspect-[2/1]' : 'aspect-video',
+                          "rounded-2xl md:rounded-3xl",
+                          peerVideoClasses.container,
+                          peerMembershipTier === 'premium_plus' && "premium-plus-glow",
+                          peerMembershipTier === 'premium' && "premium-glow"
+                        )}
+                      >
+                        {peerMembershipTier === 'premium_plus' && (
+                          <div className="absolute inset-0 premium-plus-shimmer pointer-events-none z-10 opacity-40 rounded-2xl md:rounded-3xl" />
+                        )}
+                        
+                        {/* ✅ NEW: Show loading overlay if user is leaving */}
+                        {isLeaving && (
+                          <div className="absolute inset-0 bg-muted/90 flex items-center justify-center z-30">
+                            <div className="text-center space-y-3">
+                              <Loader2 className="w-12 h-12 mx-auto text-primary animate-spin" />
+                              <p className="text-sm text-muted-foreground">
+                                {peerName} left. Finding new match...
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                        
+                        <video
+                          ref={setRemoteVideoRef(peerId)}
+                          className={cn(
+                            "w-full h-full object-cover relative z-0",
+                            isLeaving && "opacity-20"
+                          )}
+                          autoPlay
+                          playsInline
+                          muted={isSpeakerOff}
+                          onLoadedMetadata={(e) => {
+                            console.log(`📊 [Video] Metadata loaded for ${peerName}`, {
+                              videoWidth: e.currentTarget.videoWidth,
+                              videoHeight: e.currentTarget.videoHeight,
+                            });
+                          }}
+                          onPlay={() => console.log(`▶️ [Video] Playing ${peerName}`)}
+                          onPlaying={() => console.log(`✅ [Video] Successfully playing ${peerName}`)}
+                        />
+                        
+                        <div className={cn(
+                          "absolute bottom-2 md:bottom-3 left-2 md:left-3 flex items-center gap-2 rounded-full px-3 py-1.5 md:px-4 md:py-2 backdrop-blur-xl z-20",
+                          peerStyle.nameTag
+                        )}>
+                          {PeerIcon && (
+                            <PeerIcon className={cn("h-4 w-4", peerStyle.iconColor)} />
+                          )}
+                          <span className={cn("text-xs md:text-sm font-medium", peerStyle.nameTagText)}>
+                            {peerName}
+                          </span>
+                        </div>
+                        
+                        <div className="absolute top-2 md:top-3 right-2 md:right-3 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                          {hasPremiumAccess && (
+                            <button
+                              onClick={() => handleFullscreen(peerId)}
+                              className={cn(
+                                "rounded-full p-2 transition-all backdrop-blur-md",
+                                myMembershipTier === 'premium_plus'
+                                  ? "bg-yellow-500/80 hover:bg-yellow-400"
+                                  : "bg-primary/80 hover:bg-primary"
+                              )}
+                              title="Fullscreen"
+                            >
+                              <Maximize className="h-4 w-4" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleChessInviteClick(peerId, peerName)}
+                            className="bg-primary/80 hover:bg-primary backdrop-blur-md rounded-full p-2 transition-colors"
+                            title="Challenge to Chess"
+                          >
+                            <Swords className="h-4 w-4" />
+                          </button>
+                          {hasPremiumAccess && roomData?.room_size === 4 && (
+                            <button
+                              onClick={() => initiateKickVote(peerId, peerName)}
+                              className="bg-orange-500/80 hover:bg-orange-500 backdrop-blur-md rounded-full p-2 transition-colors"
+                              title="Vote to kick"
+                            >
+                              <UserX className="h-4 w-4" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleReport(peerId)}
+                            className="bg-destructive/80 hover:bg-destructive backdrop-blur-md rounded-full p-2 transition-colors"
+                            title="Report user"
+                          >
+                            <Flag className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  } else {
+                    // Empty slot - same as before
+                    slots.push(
+                      <div
+                        key={`empty-${i}`}
+                        className={cn(
+                          "rounded-2xl md:rounded-3xl border-2 border-dashed border-border/50 flex items-center justify-center relative overflow-hidden",
+                          roomData?.room_size === 4 ? 'aspect-square md:aspect-[2/1]' : 'aspect-video',
+                          "bg-gradient-to-br from-muted/10 via-muted/5 to-transparent"
+                        )}
+                      >
+                        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-primary/5 animate-pulse" />
+                        
+                        <div className="text-center space-y-4 relative z-10 p-6">
+                          <div className="relative">
+                            <div className="absolute inset-0 -m-4">
+                              <div className="w-24 h-24 mx-auto rounded-full border-2 border-primary/20 animate-ping" />
+                            </div>
+                            
+                            <div className="relative w-16 h-16 mx-auto rounded-full border-2 border-dashed border-primary/40 flex items-center justify-center bg-primary/5 backdrop-blur-sm">
+                              <Users className="h-8 w-8 text-primary/60 animate-pulse" />
+                            </div>
+                          </div>
+                          
+                          <div className="space-y-2">
+                            <p className="text-muted-foreground text-sm font-medium">
+                              Finding your match...
+                            </p>
+                            
+                            <div className="flex gap-1.5 justify-center">
+                              <div className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <div className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <div className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
                 }
                 
-                const peerMembershipTier = participant?.membership_tier || 'free';
-                const peerStyle = getMembershipStyle(peerMembershipTier);
-                const peerVideoClasses = getPremiumVideoClasses(peerMembershipTier);
-                const PeerIcon = peerStyle.icon;
-
-                slots.push(
-                  <div
-                    key={peerId}
-                    className={cn(
-                      "relative overflow-hidden bg-card group",
-                      roomData?.room_size === 4 ? 'aspect-square md:aspect-[2/1]' : 'aspect-video',
-                      "rounded-2xl md:rounded-3xl",
-                      peerVideoClasses.container,
-                      peerMembershipTier === 'premium_plus' && "premium-plus-glow",
-                      peerMembershipTier === 'premium' && "premium-glow"
-                    )}
-                  >
-                    {peerMembershipTier === 'premium_plus' && (
-                      <div className="absolute inset-0 premium-plus-shimmer pointer-events-none z-10 opacity-40 rounded-2xl md:rounded-3xl" />
-                    )}
-                    
-                    {/* ✅ VIDEO ELEMENT - Now with better debugging */}
-                    <video
-                      ref={setRemoteVideoRef(peerId)}
-                      className="w-full h-full object-cover relative z-0"
-                      autoPlay
-                      playsInline
-                      muted={isSpeakerOff}
-                      onLoadedMetadata={(e) => {
-                        console.log(`📊 [Video] Metadata loaded for ${peerName}`, {
-                          videoWidth: e.currentTarget.videoWidth,
-                          videoHeight: e.currentTarget.videoHeight,
-                          readyState: e.currentTarget.readyState,
-                          paused: e.currentTarget.paused,
-                        });
-                      }}
-                      onPlay={() => {
-                        console.log(`▶️ [Video] Playing ${peerName}`);
-                      }}
-                      onPlaying={() => {
-                        console.log(`✅ [Video] Successfully playing ${peerName}`);
-                      }}
-                      onError={(e) => {
-                        console.error(`❌ [Video] Error for ${peerName}:`, e);
-                      }}
-                    />
-                    
-                    {/* ✅ REMOVE THE LOADING OVERLAY - It's blocking the video! */}
-                    
-                    <div className={cn(
-                      "absolute bottom-2 md:bottom-3 left-2 md:left-3 flex items-center gap-2 rounded-full px-3 py-1.5 md:px-4 md:py-2 backdrop-blur-xl z-20",
-                      peerStyle.nameTag
-                    )}>
-                      {PeerIcon && (
-                        <PeerIcon className={cn("h-4 w-4", peerStyle.iconColor)} />
-                      )}
-                      <span className={cn("text-xs md:text-sm font-medium", peerStyle.nameTagText)}>
-                        {peerName}
-                      </span>
-                    </div>
-                    
-                    <div className="absolute top-2 md:top-3 right-2 md:right-3 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-20">
-                      {hasPremiumAccess && (
-                        <button
-                          onClick={() => handleFullscreen(peerId)}
-                          className={cn(
-                            "rounded-full p-2 transition-all backdrop-blur-md",
-                            myMembershipTier === 'premium_plus'
-                              ? "bg-yellow-500/80 hover:bg-yellow-400"
-                              : "bg-primary/80 hover:bg-primary"
-                          )}
-                          title="Fullscreen"
-                        >
-                          <Maximize className="h-4 w-4" />
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleChessInviteClick(peerId, peerName)}
-                        className="bg-primary/80 hover:bg-primary backdrop-blur-md rounded-full p-2 transition-colors"
-                        title="Challenge to Chess"
-                      >
-                        <Swords className="h-4 w-4" />
-                      </button>
-                      {hasPremiumAccess && roomData?.room_size === 4 && (
-                        <button
-                          onClick={() => initiateKickVote(peerId, peerName)}
-                          className="bg-orange-500/80 hover:bg-orange-500 backdrop-blur-md rounded-full p-2 transition-colors"
-                          title="Vote to kick"
-                        >
-                          <UserX className="h-4 w-4" />
-                        </button>
-                      )}
-                      <button
-                        onClick={() => handleReport(peerId)}
-                        className="bg-destructive/80 hover:bg-destructive backdrop-blur-md rounded-full p-2 transition-colors"
-                        title="Report user"
-                      >
-                        <Flag className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              } else {
-                // Empty slot rendering (same as before)
-                slots.push(
-                  <div
-                    key={`empty-${i}`}
-                    className={cn(
-                      "rounded-2xl md:rounded-3xl border-2 border-dashed border-border/50 flex items-center justify-center relative overflow-hidden",
-                      roomData?.room_size === 4 ? 'aspect-square md:aspect-[2/1]' : 'aspect-video',
-                      "bg-gradient-to-br from-muted/10 via-muted/5 to-transparent"
-                    )}
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-primary/5 animate-pulse" />
-                    
-                    <div className="text-center space-y-4 relative z-10 p-6">
-                      <div className="relative">
-                        <div className="absolute inset-0 -m-4">
-                          <div className="w-24 h-24 mx-auto rounded-full border-2 border-primary/20 animate-ping" />
-                        </div>
-                        
-                        <div className="relative w-16 h-16 mx-auto rounded-full border-2 border-dashed border-primary/40 flex items-center justify-center bg-primary/5 backdrop-blur-sm">
-                          <Users className="h-8 w-8 text-primary/60 animate-pulse" />
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-2">
-                        <p className="text-muted-foreground text-sm font-medium">
-                          {roomData?.room_size === 4 
-                            ? `Waiting for participant ${i + 1}...`
-                            : 'Finding your match...'}
-                        </p>
-                        
-                        <div className="flex gap-1.5 justify-center">
-                          <div className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '0ms' }} />
-                          <div className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '150ms' }} />
-                          <div className="w-2 h-2 rounded-full bg-primary/60 animate-bounce" style={{ animationDelay: '300ms' }} />
-                        </div>
-                        
-                        {roomData?.room_size === 2 && (
-                          <p className="text-xs text-muted-foreground/70 mt-2">
-                            Matching with {gender === 'male' ? 'females' : 'males'} first
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-            }
-            
-            return slots;
-          })()}
+                return slots;
+              })()}
           </div>
         </main>
 
