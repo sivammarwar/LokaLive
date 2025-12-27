@@ -1,0 +1,21 @@
+{
+    "name": "LOKA - Random Video Chat",
+    "short_name": "LOKA",
+    "description": "Free random video chat without registration. Meet strangers worldwide instantly.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#000000",
+    "theme_color": "#8B5CF6",
+    "icons": [
+      {
+        "src": "/loka-logo.jpeg",
+        "sizes": "192x192",
+        "type": "image/jpeg"
+      },
+      {
+        "src": "/loka-logo.jpeg",
+        "sizes": "512x512",
+        "type": "image/jpeg"
+      }
+    ]
+  }
