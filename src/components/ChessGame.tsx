@@ -1,4 +1,4 @@
-// src/components/ChessGame.tsx - FIXED: Properly handles room transitions
+// src/components/ChessGame.tsx - FIXED: Properly handles room transitions with win alerts
 import { useState, useEffect, useCallback } from 'react';
 import { Chess, Square, PieceSymbol, Color } from 'chess.js';
 import { supabase } from '@/integrations/supabase/client';
@@ -18,6 +18,7 @@ interface ChessGameProps {
   originalRoomId: string;
   isBetMatch?: boolean;
   betAmount?: number;
+  onGameEnd?: (winner: string | null, message: string) => void; // ✅ NEW: Win alert callback
 }
 
 const PIECES: Record<Color, Record<PieceSymbol, string>> = {
@@ -35,6 +36,7 @@ export function ChessGame({
   originalRoomId,
   isBetMatch = false,
   betAmount = 0,
+  onGameEnd, // ✅ NEW: Win alert callback
 }: ChessGameProps) {
   const [game, setGame] = useState(new Chess());
   const [gameStatus, setGameStatus] = useState<'active' | 'checkmate' | 'stalemate' | 'draw' | 'resigned'>('active');
@@ -49,6 +51,24 @@ export function ChessGame({
   const [validMoves, setValidMoves] = useState<string[]>([]);
   
   const { refreshDiamonds } = useDiamondStore();
+
+  // ✅ NEW: Helper function to trigger win alerts
+  const triggerWinAlert = useCallback((winnerId: string | null, message: string) => {
+    if (onGameEnd) {
+      onGameEnd(winnerId, message);
+    }
+    
+    // Also dispatch custom event for ChessGameView to catch
+    const event = new CustomEvent('chess-game-ended', { 
+      detail: { 
+        winner: winnerId,
+        message 
+      } 
+    });
+    window.dispatchEvent(event);
+    
+    console.log('🏆 Game ended alert triggered:', { winnerId, message });
+  }, [onGameEnd]);
 
   useEffect(() => {
     const fetchMyName = async () => {
@@ -107,9 +127,16 @@ export function ChessGame({
         setWinner(didIWin ? myColor : (myColor === 'white' ? 'black' : 'white'));
         
         if (didIWin && isBetMatch && betAmount > 0) {
-          toast.success(`You won ${betAmount * 2} diamonds! 💎`);
+          const message = `You won ${betAmount * 2} diamonds! 💎`;
+          toast.success(message);
+          triggerWinAlert(myUserId, message);
         } else if (didIWin) {
-          toast.success('Opponent resigned. You won!');
+          const message = 'Opponent resigned. You won!';
+          toast.success(message);
+          triggerWinAlert(myUserId, message);
+        } else {
+          const message = 'You lost the game';
+          triggerWinAlert(data.winner_id, message);
         }
       }
 
@@ -143,43 +170,71 @@ export function ChessGame({
             setLastMove(updated.last_move as { from: string; to: string });
           }
           
+          // ✅ CHECKMATE
           if (updated.status === 'checkmate') {
             const winnerColor = newGame.turn() === 'w' ? 'black' : 'white';
             setWinner(winnerColor);
+            const didIWin = winnerColor === myColor;
             
-            if (winnerColor === myColor) {
+            if (didIWin) {
               if (isBetMatch && betAmount > 0) {
-                toast.success(`Checkmate! You won ${betAmount * 2} diamonds! 💎`);
+                const message = `Checkmate! You won ${betAmount * 2} diamonds! 💎`;
+                toast.success(message);
+                triggerWinAlert(myUserId, message);
               } else {
-                toast.success('You won by checkmate!');
+                const message = 'You won by checkmate!';
+                toast.success(message);
+                triggerWinAlert(myUserId, message);
               }
-              await refreshDiamonds(myUserId);
             } else {
               if (isBetMatch && betAmount > 0) {
-                toast.error(`You lost ${betAmount} diamonds`);
+                const message = `Checkmate! You lost ${betAmount} diamonds`;
+                toast.error(message);
+                triggerWinAlert(null, message);
               } else {
-                toast.error('You lost by checkmate');
+                const message = 'You lost by checkmate';
+                toast.error(message);
+                triggerWinAlert(null, message);
               }
             }
-          } else if (updated.status === 'stalemate') {
-            toast.info('Game ended in stalemate');
+            await refreshDiamonds(myUserId);
+          } 
+          
+          // ✅ STALEMATE
+          else if (updated.status === 'stalemate') {
+            const message = 'Game ended in stalemate';
+            toast.info(message);
+            triggerWinAlert(null, message);
+            
             if (isBetMatch && betAmount > 0) {
               toast.info('Bet refunded due to stalemate');
               await refreshDiamonds(myUserId);
             }
-          } else if (updated.status === 'resigned') {
+          } 
+          
+          // ✅ RESIGNED
+          else if (updated.status === 'resigned') {
             if (updated.winner_id === myUserId) {
               setWinner(myColor);
               if (isBetMatch && betAmount > 0) {
-                toast.success(`Opponent resigned. You won ${betAmount * 2} diamonds! 💎`);
+                const message = `Opponent resigned. You won ${betAmount * 2} diamonds! 💎`;
+                toast.success(message);
+                triggerWinAlert(myUserId, message);
               } else {
-                toast.success('Opponent resigned. You won!');
+                const message = 'Opponent resigned. You won!';
+                toast.success(message);
+                triggerWinAlert(myUserId, message);
               }
               await refreshDiamonds(myUserId);
             } else {
               setWinner(myColor === 'white' ? 'black' : 'white');
               if (isBetMatch && betAmount > 0) {
-                toast.error(`You lost ${betAmount} diamonds`);
+                const message = `You resigned and lost ${betAmount} diamonds`;
+                toast.error(message);
+                triggerWinAlert(updated.winner_id, message);
+              } else {
+                const message = 'You resigned';
+                triggerWinAlert(updated.winner_id, message);
               }
             }
             
@@ -188,6 +243,13 @@ export function ChessGame({
               onClose();
             }, 3000);
           }
+          
+          // ✅ DRAW
+          else if (updated.status === 'draw') {
+            const message = 'Game ended in a draw';
+            toast.info(message);
+            triggerWinAlert(null, message);
+          }
         }
       )
       .subscribe();
@@ -195,7 +257,7 @@ export function ChessGame({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [gameId, myColor, myUserId, onClose, isBetMatch, betAmount, refreshDiamonds, findCheckSquare]);
+  }, [gameId, myColor, myUserId, onClose, isBetMatch, betAmount, refreshDiamonds, findCheckSquare, triggerWinAlert]);
 
   const isMyTurn = () => {
     return (game.turn() === 'w' && myColor === 'white') || (game.turn() === 'b' && myColor === 'black');
@@ -266,10 +328,19 @@ export function ChessGame({
         status = 'checkmate';
         winnerId = myUserId;
         setWinner(myColor);
+        
+        // ✅ Trigger win alert for checkmate
+        if (isBetMatch && betAmount > 0) {
+          triggerWinAlert(winnerId, `Checkmate! You won ${betAmount * 2} diamonds! 💎`);
+        } else {
+          triggerWinAlert(winnerId, 'Checkmate! You won!');
+        }
       } else if (gameCopy.isStalemate()) {
         status = 'stalemate';
+        triggerWinAlert(null, 'Game ended in stalemate');
       } else if (gameCopy.isDraw()) {
         status = 'draw';
+        triggerWinAlert(null, 'Game ended in a draw');
       }
 
       setGame(gameCopy);
@@ -318,6 +389,22 @@ export function ChessGame({
       if (!data) return;
 
       const winnerId = myColor === 'white' ? data.black_player_id : data.white_player_id;
+      const winnerName = myColor === 'white' ? opponentName : 'You';
+      
+      // ✅ Trigger win alert for resignation
+      if (winnerId === myUserId) {
+        if (isBetMatch && betAmount > 0) {
+          triggerWinAlert(winnerId, `Opponent resigned. You won ${betAmount * 2} diamonds! 💎`);
+        } else {
+          triggerWinAlert(winnerId, 'Opponent resigned. You won!');
+        }
+      } else {
+        if (isBetMatch && betAmount > 0) {
+          triggerWinAlert(winnerId, `You resigned and lost ${betAmount} diamonds`);
+        } else {
+          triggerWinAlert(winnerId, 'You resigned');
+        }
+      }
 
       await supabase
         .from('chess_games')
@@ -342,10 +429,14 @@ export function ChessGame({
       setGameStatus('resigned');
       setWinner(myColor === 'white' ? 'black' : 'white');
       
-      if (isBetMatch && betAmount > 0) {
+      if (isBetMatch && betAmount > 0 && winnerId !== myUserId) {
         toast.error(`You resigned and lost ${betAmount} diamonds`);
-      } else {
+      } else if (isBetMatch && betAmount > 0) {
+        toast.success(`Opponent resigned. You won ${betAmount * 2} diamonds! 💎`);
+      } else if (winnerId !== myUserId) {
         toast.error('You resigned. Returning to room...');
+      } else {
+        toast.success('Opponent resigned. You won!');
       }
 
       // ✅ FIX: Close after a delay to let user see the message

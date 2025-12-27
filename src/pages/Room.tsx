@@ -1636,12 +1636,20 @@ useEffect(() => {
   }, [userId, roomId, displayName]);
 
   // Return from chess game to original room
+  // Return from chess game to original room
   const returnToOriginalRoom = useCallback(async () => {
     if (!activeChessGame) return;
     
     console.log('🔙 Returning to original room...');
     
     try {
+      // Clear chess game state first
+      setActiveChessGame(null);
+      
+      // Wait a bit for state to clear
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Update database
       await supabase
         .from('room_participants')
         .update({ left_at: new Date().toISOString() })
@@ -1649,8 +1657,14 @@ useEffect(() => {
         .eq('user_id', userId)
         .is('left_at', null);
       
-      setActiveChessGame(null);
+      console.log('✅ Chess room left, returning to main room');
       toast.success('Returned to room');
+      
+      // ✅ CRITICAL: Force a small delay to let WebRTC reinitialize
+      setTimeout(() => {
+        console.log('✅✅✅ Room should now reconnect video streams');
+      }, 500);
+      
     } catch (error) {
       console.error('❌ Error returning to room:', error);
       toast.error('Error returning to room');

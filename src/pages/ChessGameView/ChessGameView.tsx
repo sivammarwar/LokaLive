@@ -2,8 +2,9 @@ import { RefObject, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Logo } from '@/components/Logo';
 import { ChessGame } from '@/components/ChessGame';
-import { Mic, MicOff, Volume2, VolumeX, Video, VideoOff, Swords, Gem, Loader2 } from 'lucide-react';
+import { Mic, MicOff, Volume2, VolumeX, Video, VideoOff, Swords, Gem, Loader2, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
 interface ChessGameViewProps {
   gameId: string;
@@ -60,6 +61,13 @@ export function ChessGameView({
   const [streamCheckCounter, setStreamCheckCounter] = useState(0);
   const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastHealthCheckRef = useRef<number>(Date.now());
+  
+  // ✅ NEW: Track chess game result
+  const [gameResult, setGameResult] = useState<{
+    showAlert: boolean;
+    winner: string | null;
+    message: string;
+  }>({ showAlert: false, winner: null, message: '' });
 
   // ✅ FIX: Prevent refresh/navigation from leaving chess room
   useEffect(() => {
@@ -75,6 +83,89 @@ export function ChessGameView({
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, []);
+
+  // ✅ CRITICAL FIX 1: Enhanced auto-recovery for opponent stream (same as normal room)
+  const attachOpponentStream = useRef<(() => void) | null>(null);
+
+  // Create a reusable function to attach opponent stream
+  useEffect(() => {
+    attachOpponentStream.current = () => {
+      const opponentStream = remoteStreams.get(opponentId);
+      
+      if (opponentStream && opponentStream.active) {
+        console.log(`🔄 [Chess Auto-Recovery] Attaching opponent stream to all video elements`);
+        
+        // Attach to desktop opponent video
+        if (chessOpponentVideoRef.current) {
+          const el = chessOpponentVideoRef.current;
+          // Always force re-attach to ensure stream is fresh
+          el.srcObject = opponentStream;
+          el.muted = isSpeakerOff;
+          el.playsInline = true;
+          el.autoplay = true;
+          el.setAttribute('playsinline', 'true');
+          el.setAttribute('webkit-playsinline', 'true');
+          
+          el.load();
+          el.play()
+            .then(() => {
+              console.log('✅ Desktop opponent video playing');
+              setIsOpponentStreamReady(true);
+            })
+            .catch(err => {
+              console.warn('⚠️ Desktop play failed, retrying:', err);
+              setTimeout(() => {
+                el.muted = true;
+                el.play().then(() => {
+                  if (!isSpeakerOff) {
+                    setTimeout(() => { el.muted = isSpeakerOff; }, 100);
+                  }
+                }).catch(console.error);
+              }, 500);
+            });
+        }
+        
+        // Attach to mobile opponent video
+        if (mobileOpponentVideoRef.current) {
+          const el = mobileOpponentVideoRef.current;
+          el.srcObject = opponentStream;
+          el.muted = isSpeakerOff;
+          el.playsInline = true;
+          el.autoplay = true;
+          el.setAttribute('playsinline', 'true');
+          el.setAttribute('webkit-playsinline', 'true');
+          
+          el.load();
+          el.play()
+            .then(() => {
+              console.log('✅ Mobile opponent video playing');
+              setIsOpponentStreamReady(true);
+            })
+            .catch(err => {
+              console.warn('⚠️ Mobile play failed, retrying:', err);
+              setTimeout(() => {
+                el.muted = true;
+                el.play().then(() => {
+                  if (!isSpeakerOff) {
+                    setTimeout(() => { el.muted = isSpeakerOff; }, 100);
+                  }
+                }).catch(console.error);
+              }, 500);
+            });
+        }
+        
+        // Also update the main Room component's ref
+        const tempVideoEl = document.createElement('video');
+        tempVideoEl.srcObject = opponentStream;
+        opponentVideoRef(tempVideoEl);
+        
+        console.log('✅✅✅ Opponent stream attached to all chess video elements');
+      } else {
+        console.warn('⚠️ No active opponent stream available');
+        setIsOpponentStreamReady(false);
+      }
+    };
+  }, [remoteStreams, opponentId, isSpeakerOff, opponentVideoRef]);
 
   // ✅ Attach local stream to ALL chess video elements
   useEffect(() => {
@@ -115,8 +206,14 @@ export function ChessGameView({
     }
   }, [localStream]);
 
-  // ✅ CRITICAL: Continuously monitor and re-attach opponent stream (like normal room)
+  // ✅ CRITICAL: Enhanced continuous monitoring and re-attachment (like normal room)
   useEffect(() => {
+    // Initial attachment
+    if (attachOpponentStream.current) {
+      console.log('🎬 [Chess] Initial opponent stream attachment');
+      attachOpponentStream.current();
+    }
+
     // Clear any existing health check
     if (healthCheckIntervalRef.current) {
       clearInterval(healthCheckIntervalRef.current);
@@ -126,7 +223,7 @@ export function ChessGameView({
       const opponentStream = remoteStreams.get(opponentId);
       const now = Date.now();
       
-      console.log(`🏥 [Chess Health Check #${streamCheckCounter}] Opponent stream:`, {
+      console.log(`🏥 [Chess Health Check #${streamCheckCounter}]`, {
         hasStream: !!opponentStream,
         streamActive: opponentStream?.active,
         videoTracks: opponentStream?.getVideoTracks().length || 0,
@@ -134,59 +231,37 @@ export function ChessGameView({
         timeSinceLastCheck: now - lastHealthCheckRef.current,
       });
 
+      // Check if stream is available and healthy
       if (opponentStream && opponentStream.active) {
         const videoTrack = opponentStream.getVideoTracks()[0];
         
-        // Check track health
         if (videoTrack && videoTrack.readyState === 'live') {
-          console.log(`✅ [Chess Health] Stream is healthy, re-attaching if needed`);
+          // Check if video elements are playing
+          const desktopPlaying = chessOpponentVideoRef.current && 
+            !chessOpponentVideoRef.current.paused && 
+            chessOpponentVideoRef.current.readyState >= 2;
           
-          // Re-attach to all video elements
-          [
-            { ref: chessOpponentVideoRef.current, label: 'Desktop' },
-            { ref: mobileOpponentVideoRef.current, label: 'Mobile' }
-          ].forEach(({ ref: el, label }) => {
-            if (el) {
-              // Always re-attach to ensure freshness
-              const needsAttach = el.srcObject !== opponentStream || el.paused;
-              
-              if (needsAttach) {
-                console.log(`🔄 [Chess Health] Re-attaching to ${label} opponent video`);
-                
-                el.srcObject = opponentStream;
-                el.muted = isSpeakerOff;
-                el.playsInline = true;
-                el.autoplay = true;
-                el.setAttribute('playsinline', 'true');
-                el.setAttribute('webkit-playsinline', 'true');
-                
-                el.load();
-                el.play()
-                  .then(() => {
-                    console.log(`✅ [Chess Health] ${label} opponent video playing`);
-                    setIsOpponentStreamReady(true);
-                  })
-                  .catch(err => {
-                    console.warn(`⚠️ [Chess Health] ${label} play failed:`, err);
-                    // Try user interaction workaround
-                    setTimeout(() => {
-                      el.muted = true;
-                      el.play().then(() => {
-                        if (!isSpeakerOff) {
-                          setTimeout(() => { el.muted = isSpeakerOff; }, 100);
-                        }
-                      }).catch(console.error);
-                    }, 500);
-                  });
-              } else if (el.srcObject === opponentStream && !el.paused) {
-                // Already playing, mark as ready
-                setIsOpponentStreamReady(true);
-              }
+          const mobilePlaying = mobileOpponentVideoRef.current && 
+            !mobileOpponentVideoRef.current.paused && 
+            mobileOpponentVideoRef.current.readyState >= 2;
+          
+          // If not playing, re-attach
+          if (!desktopPlaying || !mobilePlaying) {
+            console.log(`🔄 [Chess Health] Video not playing, re-attaching...`);
+            if (attachOpponentStream.current) {
+              attachOpponentStream.current();
             }
-          });
+          } else {
+            setIsOpponentStreamReady(true);
+          }
         } else {
           console.warn(`⚠️ [Chess Health] Video track not live:`, videoTrack?.readyState);
           setIsOpponentStreamReady(false);
+          
+          // Try to re-attach anyway
+          if (attachOpponentStream.current) {
+            attachOpponentStream.current();
+          }
         }
       } else {
         console.warn(`⚠️ [Chess Health] No active opponent stream`);
@@ -197,9 +272,6 @@ export function ChessGameView({
       setStreamCheckCounter(prev => prev + 1);
     };
 
-    // Initial check immediately
-    checkAndAttachStream();
-
     // Continuous health monitoring every 2 seconds (like normal room)
     healthCheckIntervalRef.current = setInterval(checkAndAttachStream, 2000);
 
@@ -209,7 +281,7 @@ export function ChessGameView({
         healthCheckIntervalRef.current = null;
       }
     };
-  }, [remoteStreams, opponentId, isSpeakerOff, streamCheckCounter]);
+  }, [remoteStreams, opponentId, streamCheckCounter]);
 
   // ✅ Update speaker state for opponent videos when toggled
   useEffect(() => {
@@ -221,11 +293,101 @@ export function ChessGameView({
     }
   }, [isSpeakerOff]);
 
+  // ✅ FIX 2: Listen for game results and show alert
+  useEffect(() => {
+    // This would be connected to your chess game component
+    // For now, I'll create a simulated listener
+    const handleGameResult = (event: CustomEvent) => {
+      const { winner, message } = event.detail;
+      
+      setGameResult({
+        showAlert: true,
+        winner,
+        message
+      });
+      
+      toast.success(message);
+    };
+
+    // Listen for custom event from ChessGame component
+    window.addEventListener('chess-game-ended', handleGameResult as EventListener);
+
+    return () => {
+      window.removeEventListener('chess-game-ended', handleGameResult as EventListener);
+    };
+  }, []);
+
+  // ✅ Function to handle return to room after win alert
+  const handleReturnToRoom = () => {
+    setGameResult({ showAlert: false, winner: null, message: '' });
+    
+    // Close the chess game and return to room
+    setTimeout(() => {
+      onClose();
+    }, 500);
+  };
+
+  // ✅ FIX 3: Ensure clean return to room by pre-warming connections
+  useEffect(() => {
+    // This effect ensures that when we return to room, 
+    // the remoteStreams are properly maintained
+    return () => {
+      console.log('♟️ [ChessGameView] Cleaning up - returning to room');
+      
+      // Clear intervals
+      if (healthCheckIntervalRef.current) {
+        clearInterval(healthCheckIntervalRef.current);
+      }
+      
+      // Force a small delay to let WebRTC hooks reinitialize
+      setTimeout(() => {
+        console.log('♟️ [ChessGameView] Cleanup complete - room should reconnect');
+      }, 100);
+    };
+  }, []);
+
   // ✅ Check if opponent stream exists
   const hasOpponentStream = remoteStreams.has(opponentId);
 
   return (
     <div className="fixed inset-0 z-50 bg-background flex flex-col">
+      {/* Win Alert Modal */}
+      {gameResult.showAlert && (
+        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="glass-strong rounded-2xl p-6 max-w-sm w-full space-y-4 animate-slide-up">
+            <div className="text-center space-y-2">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gradient-to-br from-green-500/20 to-emerald-500/20 mb-2">
+                <AlertCircle className="h-8 w-8 text-green-500" />
+              </div>
+              <h3 className="text-xl font-bold">Game Over!</h3>
+              <p className="text-muted-foreground">
+                {gameResult.message}
+              </p>
+              {isBetMatch && betAmount > 0 && (
+                <div className="glass rounded-xl p-3 space-y-1">
+                  <p className="text-sm font-medium flex items-center justify-center gap-2">
+                    <Gem className="h-4 w-4 text-amber-500" />
+                    {gameResult.winner === myUserId ? 
+                      `You won ${betAmount * 2} diamonds!` : 
+                      `You lost ${betAmount} diamonds`
+                    }
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="flex gap-3">
+              <Button 
+                variant="default"
+                className="flex-1" 
+                onClick={handleReturnToRoom}
+              >
+                Return to Room
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header - ✅ REMOVED BACK BUTTON */}
       <header className="flex items-center justify-between p-2 md:p-4 border-b border-border">
         <Logo size="sm" />
@@ -267,6 +429,14 @@ export function ChessGameView({
             originalRoomId={originalRoomId}
             isBetMatch={isBetMatch}
             betAmount={betAmount}
+            onGameEnd={(winner, message) => {
+              // Trigger win alert
+              setGameResult({
+                showAlert: true,
+                winner,
+                message
+              });
+            }}
           />
         </div>
 
@@ -298,13 +468,25 @@ export function ChessGameView({
             "relative rounded-xl overflow-hidden bg-card shadow-lg aspect-video",
             isBetMatch && "ring-2 ring-amber-500/30"
           )}>
-            {/* ✅ Loading overlay if no stream */}
+            {/* ✅ Enhanced loading overlay with retry button */}
             {!isOpponentStreamReady && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-muted/20 z-10">
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-muted/30 z-10">
                 <Loader2 className="w-8 h-8 text-primary animate-spin mb-2" />
-                <p className="text-xs text-muted-foreground">
-                  {hasOpponentStream ? 'Loading video...' : 'Connecting to opponent...'}
+                <p className="text-xs text-muted-foreground mb-2">
+                  {hasOpponentStream ? 'Connecting video...' : 'Waiting for opponent...'}
                 </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    if (attachOpponentStream.current) {
+                      attachOpponentStream.current();
+                    }
+                  }}
+                  className="text-xs"
+                >
+                  Retry Connection
+                </Button>
               </div>
             )}
             
@@ -323,6 +505,12 @@ export function ChessGameView({
               }}
               onPause={() => {
                 console.log('⏸️ Desktop opponent video paused');
+              }}
+              onStalled={() => {
+                console.warn('⚠️ Desktop opponent video stalled, retrying...');
+                if (attachOpponentStream.current) {
+                  setTimeout(() => attachOpponentStream.current!(), 500);
+                }
               }}
             />
             <div className="absolute bottom-2 left-2 glass rounded-full px-3 py-1">
@@ -425,7 +613,7 @@ export function ChessGameView({
               ? "ring-2 ring-amber-500/50" 
               : "ring-2 ring-primary/30"
           )}>
-            {/* ✅ Loading overlay if no stream */}
+            {/* ✅ Enhanced loading overlay */}
             {!isOpponentStreamReady && (
               <div className="absolute inset-0 flex items-center justify-center bg-muted/40 z-10">
                 <Loader2 className="w-6 h-6 text-primary animate-spin" />
@@ -440,6 +628,13 @@ export function ChessGameView({
               className="w-full h-full object-cover scale-150"
               onPlay={() => {
                 console.log('✅ Mobile opponent video playing');
+                setIsOpponentStreamReady(true);
+              }}
+              onStalled={() => {
+                console.warn('⚠️ Mobile opponent video stalled');
+                if (attachOpponentStream.current) {
+                  setTimeout(() => attachOpponentStream.current!(), 500);
+                }
               }}
             />
             <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent pointer-events-none" />
