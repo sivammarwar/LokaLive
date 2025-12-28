@@ -357,7 +357,7 @@ export default function Login() {
             {/* Stats */}
             <div className="flex gap-8 pt-4">
               <div>
-                <div className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                <div className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 text-yellow-400 bg-clip-text text-transparent">
                  🫵
                 </div>
                 <div className="text-sm text-gray-400">Active Users</div>
