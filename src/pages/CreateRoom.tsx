@@ -430,11 +430,12 @@ useEffect(() => {
         // Find or create room (simplified function)
         console.log('🔍 Calling find_compatible_room_simple...');
         
+        // ✅ FIXED: Cast gender to match database type
         const { data: roomData, error: findError } = await supabase.rpc(
           'find_compatible_room_simple',
           {
             p_user_id: userId,
-            p_user_gender: userGender,
+            p_user_gender: userGender as any, // TypeScript cast
             p_room_size: roomSize,
           }
         );

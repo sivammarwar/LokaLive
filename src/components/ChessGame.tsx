@@ -12,13 +12,14 @@ interface ChessGameProps {
   gameId: string;
   myUserId: string;
   myColor: 'white' | 'black';
+  opponentId: string; // ✅ ADD THIS
   opponentName: string;
   onClose: () => void;
   isEmbedded?: boolean;
   originalRoomId: string;
   isBetMatch?: boolean;
   betAmount?: number;
-  onGameEnd?: (winner: string | null, message: string) => void; // ✅ NEW: Win alert callback
+  onGameEnd?: (winner: string | null, message: string) => void;
 }
 
 const PIECES: Record<Color, Record<PieceSymbol, string>> = {
@@ -30,13 +31,14 @@ export function ChessGame({
   gameId, 
   myUserId, 
   myColor, 
+  opponentId, // ✅ ADD THIS
   opponentName, 
   onClose,
   isEmbedded = false,
   originalRoomId,
   isBetMatch = false,
   betAmount = 0,
-  onGameEnd, // ✅ NEW: Win alert callback
+  onGameEnd,
 }: ChessGameProps) {
   const [game, setGame] = useState(new Chess());
   const [gameStatus, setGameStatus] = useState<'active' | 'checkmate' | 'stalemate' | 'draw' | 'resigned'>('active');
@@ -335,12 +337,50 @@ export function ChessGame({
         } else {
           triggerWinAlert(winnerId, 'Checkmate! You won!');
         }
+        
+        // ✅ NEW: Broadcast game end
+        const chessEndChannel = supabase.channel(`chess-end-${gameId}`);
+        await chessEndChannel.send({
+          type: 'broadcast',
+          event: 'game-over',
+          payload: {
+            gameId,
+            status: 'checkmate',
+            winnerId: winnerId
+          }
+        });
+        
       } else if (gameCopy.isStalemate()) {
         status = 'stalemate';
         triggerWinAlert(null, 'Game ended in stalemate');
+        
+        // ✅ NEW: Broadcast stalemate
+        const chessEndChannel = supabase.channel(`chess-end-${gameId}`);
+        await chessEndChannel.send({
+          type: 'broadcast',
+          event: 'game-over',
+          payload: {
+            gameId,
+            status: 'stalemate',
+            winnerId: null
+          }
+        });
+        
       } else if (gameCopy.isDraw()) {
         status = 'draw';
         triggerWinAlert(null, 'Game ended in a draw');
+        
+        // ✅ NEW: Broadcast draw
+        const chessEndChannel = supabase.channel(`chess-end-${gameId}`);
+        await chessEndChannel.send({
+          type: 'broadcast',
+          event: 'game-over',
+          payload: {
+            gameId,
+            status: 'draw',
+            winnerId: null
+          }
+        });
       }
 
       setGame(gameCopy);
@@ -385,11 +425,11 @@ export function ChessGame({
         .select('white_player_id, black_player_id')
         .eq('id', gameId)
         .single();
-
+  
       if (!data) return;
-
+  
       const winnerId = myColor === 'white' ? data.black_player_id : data.white_player_id;
-      const winnerName = myColor === 'white' ? opponentName : 'You';
+      const opponentId = myColor === 'white' ? data.black_player_id : data.white_player_id;
       
       // ✅ Trigger win alert for resignation
       if (winnerId === myUserId) {
@@ -405,7 +445,8 @@ export function ChessGame({
           triggerWinAlert(winnerId, 'You resigned');
         }
       }
-
+  
+      // Update game in database
       await supabase
         .from('chess_games')
         .update({
@@ -414,7 +455,21 @@ export function ChessGame({
           updated_at: new Date().toISOString(),
         })
         .eq('id', gameId);
-
+  
+      // ✅ NEW: Broadcast to chess-specific channel for opponent
+      const chessEndChannel = supabase.channel(`chess-end-${gameId}`);
+      await chessEndChannel.send({
+        type: 'broadcast',
+        event: 'chess-resigned',
+        payload: {
+          gameId,
+          resignerId: myUserId,
+          resignerName: myDisplayName,
+          winnerId: winnerId
+        }
+      });
+  
+      // ✅ KEEP: Original broadcast for backward compatibility
       const chessChannel = supabase.channel(`chess-invites-${originalRoomId}`);
       await chessChannel.send({
         type: 'broadcast',
@@ -425,7 +480,7 @@ export function ChessGame({
           resignerName: myDisplayName,
         },
       });
-
+  
       setGameStatus('resigned');
       setWinner(myColor === 'white' ? 'black' : 'white');
       
@@ -438,7 +493,7 @@ export function ChessGame({
       } else {
         toast.success('Opponent resigned. You won!');
       }
-
+  
       // ✅ FIX: Close after a delay to let user see the message
       setTimeout(() => {
         onClose();

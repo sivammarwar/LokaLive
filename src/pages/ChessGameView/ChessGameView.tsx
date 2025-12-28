@@ -1,10 +1,12 @@
-import { RefObject, useEffect, useRef, useState } from 'react';
+// src/components/ChessGameView.tsx - FIXED: With auto-reconnect on return
+import { RefObject, useEffect, useRef, useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Logo } from '@/components/Logo';
 import { ChessGame } from '@/components/ChessGame';
 import { Mic, MicOff, Volume2, VolumeX, Video, VideoOff, Swords, Gem, Loader2, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
+import { supabase } from '@/integrations/supabase/client';
 
 interface ChessGameViewProps {
   gameId: string;
@@ -55,21 +57,25 @@ export function ChessGameView({
   const chessOpponentVideoRef = useRef<HTMLVideoElement>(null);
   const mobileLocalVideoRef = useRef<HTMLVideoElement>(null);
   const mobileOpponentVideoRef = useRef<HTMLVideoElement>(null);
-
-  // ✅ Track opponent stream health
-  const [isOpponentStreamReady, setIsOpponentStreamReady] = useState(false);
-  const [streamCheckCounter, setStreamCheckCounter] = useState(0);
-  const healthCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const lastHealthCheckRef = useRef<number>(Date.now());
   
-  // ✅ NEW: Track chess game result
+  const [isOpponentConnected, setIsOpponentConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState('Connecting...');
+  const [retryCount, setRetryCount] = useState(0);
+  
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectionCheckRef = useRef<NodeJS.Timeout | null>(null);
+  const opponentStreamRef = useRef<MediaStream | null>(null);
+  
   const [gameResult, setGameResult] = useState<{
     showAlert: boolean;
     winner: string | null;
     message: string;
   }>({ showAlert: false, winner: null, message: '' });
 
-  // ✅ FIX: Prevent refresh/navigation from leaving chess room
+  // ✅ NEW: Track if returning from chess to trigger reconnection
+  const [isReturning, setIsReturning] = useState(false);
+
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
@@ -84,95 +90,311 @@ export function ChessGameView({
     };
   }, []);
 
-  // ✅ CRITICAL FIX 1: Enhanced auto-recovery for opponent stream (same as normal room)
-  const attachOpponentStream = useRef<(() => void) | null>(null);
+  const cleanupTimeouts = () => {
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+      retryTimeoutRef.current = null;
+    }
+    if (connectionCheckRef.current) {
+      clearInterval(connectionCheckRef.current);
+      connectionCheckRef.current = null;
+    }
+  };
 
-  // Create a reusable function to attach opponent stream
+  const setupWebRTC = useCallback(async (isInitiator: boolean) => {
+    if (!myUserId || !opponentId || !localStream) return;
+
+    setConnectionStatus('Setting up connection...');
+    console.log('♟️ [Chess WebRTC] Setting up, initiator:', isInitiator);
+
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+    }
+
+    cleanupTimeouts();
+
+    try {
+      const pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+        ]
+      });
+      peerConnectionRef.current = pc;
+
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+
+      pc.ontrack = (event) => {
+        console.log('♟️ [Chess WebRTC] Remote track received:', event.track.kind);
+        if (event.streams[0]) {
+          const stream = event.streams[0];
+          opponentStreamRef.current = stream;
+          
+          if (chessOpponentVideoRef.current) {
+            chessOpponentVideoRef.current.srcObject = stream;
+            chessOpponentVideoRef.current.play()
+              .then(() => {
+                console.log('✅ Desktop chess video playing');
+                setConnectionStatus('Connected');
+                setIsOpponentConnected(true);
+                setRetryCount(0);
+              })
+              .catch(() => {
+                setConnectionStatus('Connected (click to play)');
+                setIsOpponentConnected(true);
+                setRetryCount(0);
+              });
+          }
+          
+          if (mobileOpponentVideoRef.current) {
+            mobileOpponentVideoRef.current.srcObject = stream;
+            mobileOpponentVideoRef.current.play()
+              .then(() => console.log('✅ Mobile chess video playing'))
+              .catch(console.error);
+          }
+          
+          const tempVideoEl = document.createElement('video');
+          tempVideoEl.srcObject = stream;
+          opponentVideoRef(tempVideoEl);
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        console.log('♟️ [Chess WebRTC] ICE state:', state);
+        
+        if (state === 'connected' || state === 'completed') {
+          setConnectionStatus('Connected');
+          setIsOpponentConnected(true);
+          setRetryCount(0);
+        } else if (state === 'failed') {
+          setConnectionStatus('Connection failed - Reconnecting...');
+          console.log('♟️ Connection failed, will retry...');
+          
+          retryTimeoutRef.current = setTimeout(() => {
+            console.log('♟️ Auto-retrying connection...');
+            setRetryCount(prev => prev + 1);
+            if (retryCount < 3) {
+              setupWebRTC(isInitiator);
+            } else {
+              setConnectionStatus('Failed to connect after multiple attempts');
+              toast.error('Unable to establish connection. Please try again.');
+            }
+          }, 3000);
+        } else if (state === 'disconnected') {
+          setConnectionStatus('Disconnected - Reconnecting...');
+          retryTimeoutRef.current = setTimeout(() => {
+            console.log('♟️ Auto-reconnecting after disconnect...');
+            setupWebRTC(isInitiator);
+          }, 2000);
+        }
+      };
+
+      pc.onicecandidate = async (event) => {
+        if (event.candidate && opponentId) {
+          try {
+            await supabase.from('chess_signaling').insert({
+              chess_game_id: gameId,
+              from_user: myUserId,
+              to_user: opponentId,
+              signal_type: 'ice-candidate',
+              signal_data: { candidate: event.candidate }
+            });
+          } catch (error) {
+            console.error('♟️ Error sending ICE candidate:', error);
+          }
+        }
+      };
+
+      if (isInitiator) {
+        console.log('♟️ Creating offer as initiator');
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          
+          await supabase.from('chess_signaling').insert({
+            chess_game_id: gameId,
+            from_user: myUserId,
+            to_user: opponentId,
+            signal_type: 'offer',
+            signal_data: { sdp: offer }
+          });
+          
+          console.log('♟️ Offer sent');
+          
+          connectionCheckRef.current = setInterval(() => {
+            if (pc.iceConnectionState === 'checking' || pc.iceConnectionState === 'new') {
+              console.log('♟️ Connection stuck in checking state, will retry...');
+              setupWebRTC(isInitiator);
+            }
+          }, 10000);
+          
+        } catch (error) {
+          console.error('♟️ Error creating offer:', error);
+          setTimeout(() => setupWebRTC(isInitiator), 2000);
+        }
+      }
+
+    } catch (error) {
+      console.error('♟️ WebRTC setup error:', error);
+      setConnectionStatus('Setup failed - Retrying...');
+      retryTimeoutRef.current = setTimeout(() => {
+        setupWebRTC(isInitiator);
+      }, 3000);
+    }
+  }, [myUserId, opponentId, localStream, gameId, retryCount, opponentVideoRef]);
+
+  // ✅ NEW: Listen for chess end signals from opponent
   useEffect(() => {
-    attachOpponentStream.current = () => {
-      const opponentStream = remoteStreams.get(opponentId);
+    if (!myUserId || !opponentId || !gameId) return;
+
+    console.log('♟️ Setting up chess end signal listener');
+
+    const channel = supabase
+      .channel(`chess-end-signaling-${myUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'chess_signaling',
+          filter: `to_user=eq.${myUserId}`,
+        },
+        async (payload) => {
+          const signal = payload.new as any;
+          if (signal.from_user !== opponentId) return;
+
+          console.log('♟️ Received chess end signal:', signal.signal_type);
+
+          if (signal.signal_type === 'game-over' || signal.signal_type === 'resigned') {
+            console.log('♟️ Opponent ended chess, preparing to return...');
+            // Opponent ended the game, prepare for return
+            setIsReturning(true);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [myUserId, opponentId, gameId]);
+
+  useEffect(() => {
+    if (!myUserId || !opponentId || !gameId) return;
+
+    console.log('♟️ Setting up chess signaling listener for opponent:', opponentId);
+
+    const channel = supabase
+      .channel(`chess-signaling-${opponentId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'chess_signaling',
+          filter: `to_user=eq.${myUserId}`,
+        },
+        async (payload) => {
+          const signal = payload.new as any;
+          const pc = peerConnectionRef.current;
+          
+          if (!pc || signal.from_user !== opponentId) return;
+
+          console.log('♟️ Received chess signal:', signal.signal_type);
+
+          try {
+            switch (signal.signal_type) {
+              case 'offer':
+                console.log('♟️ Processing chess offer from opponent');
+                await pc.setRemoteDescription(new RTCSessionDescription(signal.signal_data.sdp));
+                
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                
+                await supabase.from('chess_signaling').insert({
+                  chess_game_id: gameId,
+                  from_user: myUserId,
+                  to_user: opponentId,
+                  signal_type: 'answer',
+                  signal_data: { sdp: answer }
+                });
+                break;
+
+              case 'answer':
+                console.log('♟️ Processing chess answer from opponent');
+                if (signal.from_user === opponentId) {
+                  await pc.setRemoteDescription(new RTCSessionDescription(signal.signal_data.sdp));
+                }
+                break;
+
+              case 'ice-candidate':
+                if (signal.signal_data.candidate) {
+                  await pc.addIceCandidate(new RTCIceCandidate(signal.signal_data.candidate));
+                }
+                break;
+            }
+          } catch (error) {
+            console.error('♟️ Signal processing error:', error);
+            if (error.toString().includes('wrong state') || error.toString().includes('stable')) {
+              console.log('♟️ WebRTC state error, restarting connection...');
+              setTimeout(() => setupWebRTC(false), 2000);
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [myUserId, opponentId, gameId, setupWebRTC]);
+
+  // ✅ NEW: Enhanced cleanup with reconnection trigger
+  useEffect(() => {
+    return () => {
+      console.log('♟️ ChessGameView unmounting, triggering reconnection...');
+      cleanupTimeouts();
       
-      if (opponentStream && opponentStream.active) {
-        console.log(`🔄 [Chess Auto-Recovery] Attaching opponent stream to all video elements`);
-        
-        // Attach to desktop opponent video
-        if (chessOpponentVideoRef.current) {
-          const el = chessOpponentVideoRef.current;
-          // Always force re-attach to ensure stream is fresh
-          el.srcObject = opponentStream;
-          el.muted = isSpeakerOff;
-          el.playsInline = true;
-          el.autoplay = true;
-          el.setAttribute('playsinline', 'true');
-          el.setAttribute('webkit-playsinline', 'true');
-          
-          el.load();
-          el.play()
-            .then(() => {
-              console.log('✅ Desktop opponent video playing');
-              setIsOpponentStreamReady(true);
-            })
-            .catch(err => {
-              console.warn('⚠️ Desktop play failed, retrying:', err);
-              setTimeout(() => {
-                el.muted = true;
-                el.play().then(() => {
-                  if (!isSpeakerOff) {
-                    setTimeout(() => { el.muted = isSpeakerOff; }, 100);
-                  }
-                }).catch(console.error);
-              }, 500);
-            });
-        }
-        
-        // Attach to mobile opponent video
-        if (mobileOpponentVideoRef.current) {
-          const el = mobileOpponentVideoRef.current;
-          el.srcObject = opponentStream;
-          el.muted = isSpeakerOff;
-          el.playsInline = true;
-          el.autoplay = true;
-          el.setAttribute('playsinline', 'true');
-          el.setAttribute('webkit-playsinline', 'true');
-          
-          el.load();
-          el.play()
-            .then(() => {
-              console.log('✅ Mobile opponent video playing');
-              setIsOpponentStreamReady(true);
-            })
-            .catch(err => {
-              console.warn('⚠️ Mobile play failed, retrying:', err);
-              setTimeout(() => {
-                el.muted = true;
-                el.play().then(() => {
-                  if (!isSpeakerOff) {
-                    setTimeout(() => { el.muted = isSpeakerOff; }, 100);
-                  }
-                }).catch(console.error);
-              }, 500);
-            });
-        }
-        
-        // Also update the main Room component's ref
-        const tempVideoEl = document.createElement('video');
-        tempVideoEl.srcObject = opponentStream;
-        opponentVideoRef(tempVideoEl);
-        
-        console.log('✅✅✅ Opponent stream attached to all chess video elements');
-      } else {
-        console.warn('⚠️ No active opponent stream available');
-        setIsOpponentStreamReady(false);
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+      }
+      if (opponentStreamRef.current) {
+        opponentStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+      
+      // Trigger reconnection in main room when chess ends
+      if (!isReturning) {
+        console.log('♟️ Sending return-from-chess event');
+        window.dispatchEvent(new CustomEvent('return-from-chess', {
+          detail: { gameId, opponentId }
+        }));
       }
     };
-  }, [remoteStreams, opponentId, isSpeakerOff, opponentVideoRef]);
+  }, [isReturning, gameId, opponentId]);
 
-  // ✅ Attach local stream to ALL chess video elements
+  useEffect(() => {
+    if (!myUserId || !opponentId || !localStream) return;
+
+    const initTimer = setTimeout(() => {
+      const isInitiator = myColor === 'white';
+      console.log(`♟️ Starting chess WebRTC, initiator: ${isInitiator} (I'm ${myColor})`);
+      setupWebRTC(isInitiator);
+    }, 1000);
+
+    return () => {
+      clearTimeout(initTimer);
+    };
+  }, [myUserId, opponentId, localStream, myColor, setupWebRTC]);
+
   useEffect(() => {
     if (localStream) {
       console.log('♟️ Attaching local stream to chess video elements');
       
-      // Desktop local video
       if (chessLocalVideoRef.current) {
         const el = chessLocalVideoRef.current;
         if (el.srcObject !== localStream) {
@@ -181,14 +403,11 @@ export function ChessGameView({
           el.muted = true;
           el.playsInline = true;
           el.autoplay = true;
-          el.setAttribute('playsinline', 'true');
-          el.setAttribute('webkit-playsinline', 'true');
           el.load();
           el.play().catch(console.error);
         }
       }
 
-      // Mobile local video
       if (mobileLocalVideoRef.current) {
         const el = mobileLocalVideoRef.current;
         if (el.srcObject !== localStream) {
@@ -197,8 +416,6 @@ export function ChessGameView({
           el.muted = true;
           el.playsInline = true;
           el.autoplay = true;
-          el.setAttribute('playsinline', 'true');
-          el.setAttribute('webkit-playsinline', 'true');
           el.load();
           el.play().catch(console.error);
         }
@@ -206,84 +423,6 @@ export function ChessGameView({
     }
   }, [localStream]);
 
-  // ✅ CRITICAL: Enhanced continuous monitoring and re-attachment (like normal room)
-  useEffect(() => {
-    // Initial attachment
-    if (attachOpponentStream.current) {
-      console.log('🎬 [Chess] Initial opponent stream attachment');
-      attachOpponentStream.current();
-    }
-
-    // Clear any existing health check
-    if (healthCheckIntervalRef.current) {
-      clearInterval(healthCheckIntervalRef.current);
-    }
-
-    const checkAndAttachStream = () => {
-      const opponentStream = remoteStreams.get(opponentId);
-      const now = Date.now();
-      
-      console.log(`🏥 [Chess Health Check #${streamCheckCounter}]`, {
-        hasStream: !!opponentStream,
-        streamActive: opponentStream?.active,
-        videoTracks: opponentStream?.getVideoTracks().length || 0,
-        audioTracks: opponentStream?.getAudioTracks().length || 0,
-        timeSinceLastCheck: now - lastHealthCheckRef.current,
-      });
-
-      // Check if stream is available and healthy
-      if (opponentStream && opponentStream.active) {
-        const videoTrack = opponentStream.getVideoTracks()[0];
-        
-        if (videoTrack && videoTrack.readyState === 'live') {
-          // Check if video elements are playing
-          const desktopPlaying = chessOpponentVideoRef.current && 
-            !chessOpponentVideoRef.current.paused && 
-            chessOpponentVideoRef.current.readyState >= 2;
-          
-          const mobilePlaying = mobileOpponentVideoRef.current && 
-            !mobileOpponentVideoRef.current.paused && 
-            mobileOpponentVideoRef.current.readyState >= 2;
-          
-          // If not playing, re-attach
-          if (!desktopPlaying || !mobilePlaying) {
-            console.log(`🔄 [Chess Health] Video not playing, re-attaching...`);
-            if (attachOpponentStream.current) {
-              attachOpponentStream.current();
-            }
-          } else {
-            setIsOpponentStreamReady(true);
-          }
-        } else {
-          console.warn(`⚠️ [Chess Health] Video track not live:`, videoTrack?.readyState);
-          setIsOpponentStreamReady(false);
-          
-          // Try to re-attach anyway
-          if (attachOpponentStream.current) {
-            attachOpponentStream.current();
-          }
-        }
-      } else {
-        console.warn(`⚠️ [Chess Health] No active opponent stream`);
-        setIsOpponentStreamReady(false);
-      }
-      
-      lastHealthCheckRef.current = now;
-      setStreamCheckCounter(prev => prev + 1);
-    };
-
-    // Continuous health monitoring every 2 seconds (like normal room)
-    healthCheckIntervalRef.current = setInterval(checkAndAttachStream, 2000);
-
-    return () => {
-      if (healthCheckIntervalRef.current) {
-        clearInterval(healthCheckIntervalRef.current);
-        healthCheckIntervalRef.current = null;
-      }
-    };
-  }, [remoteStreams, opponentId, streamCheckCounter]);
-
-  // ✅ Update speaker state for opponent videos when toggled
   useEffect(() => {
     if (chessOpponentVideoRef.current) {
       chessOpponentVideoRef.current.muted = isSpeakerOff;
@@ -293,10 +432,8 @@ export function ChessGameView({
     }
   }, [isSpeakerOff]);
 
-  // ✅ FIX 2: Listen for game results and show alert
+  // ✅ NEW: Listen for return events from chess game
   useEffect(() => {
-    // This would be connected to your chess game component
-    // For now, I'll create a simulated listener
     const handleGameResult = (event: CustomEvent) => {
       const { winner, message } = event.detail;
       
@@ -306,10 +443,9 @@ export function ChessGameView({
         message
       });
       
-      toast.success(message);
+      toast.success(message, { duration: 3000 });
     };
 
-    // Listen for custom event from ChessGame component
     window.addEventListener('chess-game-ended', handleGameResult as EventListener);
 
     return () => {
@@ -317,37 +453,138 @@ export function ChessGameView({
     };
   }, []);
 
-  // ✅ Function to handle return to room after win alert
-  const handleReturnToRoom = () => {
-    setGameResult({ showAlert: false, winner: null, message: '' });
+  // ✅ NEW: Enhanced return to room with reconnection trigger
+  // ✅ NEW: Listen for opponent returning from chess
+useEffect(() => {
+  if (!gameId) return;
+
+  console.log('♟️ Setting up opponent return listener');
+
+  const channel = supabase
+    .channel(`chess-end-${gameId}`)
+    .on('broadcast', { event: 'player-returning' }, (payload) => {
+      const { userId, newRoomId } = payload.payload;
+      
+      if (userId === opponentId) {
+        console.log('♟️ Opponent is returning to room:', newRoomId);
+        toast.info(`${opponentName} returned to room`, { duration: 2000 });
+        
+        // If opponent returns first, we should also return
+        setTimeout(() => {
+          handleReturnToRoom();
+        }, 1000);
+      }
+    })
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}, [gameId, opponentId, opponentName]); // Don't include handleReturnToRoom in deps
+
+// ✅ UPDATED: Enhanced return with database logic
+const handleReturnToRoom = useCallback(async () => {
+  console.log('🏁 Returning to room from chess...');
+  
+  setIsReturning(true);
+  setGameResult({ showAlert: false, winner: null, message: '' });
+  
+  try {
+    // Call database function to handle room logic
+    const { data: returnData, error: returnError } = await supabase.rpc(
+      'return_from_chess_to_appropriate_room',
+      {
+        p_game_id: gameId,
+        p_user_id: myUserId
+      }
+    );
     
-    // Close the chess game and return to room
-    setTimeout(() => {
+    if (returnError) {
+      console.error('❌ Error returning from chess:', returnError);
+      toast.error('Error returning to room');
       onClose();
-    }, 500);
+      return;
+    }
+    
+    const result = returnData as {
+      success: boolean;
+      new_room_id?: string;
+      room_size?: number;
+      is_new_room?: boolean;
+      message?: string;
+      error?: string;
+    };
+    
+    if (!result.success) {
+      console.error('❌ Return failed:', result.error);
+      toast.error('Could not return to room');
+      onClose();
+      return;
+    }
+    
+    console.log('✅ Chess return result:', result);
+    
+    // Broadcast to opponent that we're returning
+    const chessChannel = supabase.channel(`chess-end-${gameId}`);
+    await chessChannel.send({
+      type: 'broadcast',
+      event: 'player-returning',
+      payload: {
+        gameId,
+        userId: myUserId,
+        newRoomId: result.new_room_id
+      }
+    });
+    
+    // Trigger reconnection event with new room info
+    window.dispatchEvent(new CustomEvent('return-from-chess', {
+      detail: { 
+        gameId, 
+        opponentId,
+        newRoomId: result.new_room_id,
+        roomSize: result.room_size,
+        isNewRoom: result.is_new_room,
+        triggeredBy: 'user-click'
+      }
+    }));
+    
+    // Show appropriate message
+    if (result.is_new_room && result.room_size === 2) {
+      toast.success('Moving to new 2-person room...', { duration: 2000 });
+    } else if (!result.is_new_room) {
+      toast.success('Returning to room...', { duration: 2000 });
+    }
+    
+    // Navigate to the new/original room
+    if (result.new_room_id) {
+      setTimeout(() => {
+        window.location.href = `/room/${result.new_room_id}`;
+      }, 500);
+    } else {
+      onClose();
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in handleReturnToRoom:', error);
+    toast.error('Error returning to room');
+    onClose();
+  }
+}, [onClose, gameId, opponentId, myUserId]);
+
+  const restartChessConnection = () => {
+    cleanupTimeouts();
+    setRetryCount(0);
+    const isInitiator = myColor === 'white';
+    setupWebRTC(isInitiator);
   };
 
-  // ✅ FIX 3: Ensure clean return to room by pre-warming connections
-  useEffect(() => {
-    // This effect ensures that when we return to room, 
-    // the remoteStreams are properly maintained
-    return () => {
-      console.log('♟️ [ChessGameView] Cleaning up - returning to room');
-      
-      // Clear intervals
-      if (healthCheckIntervalRef.current) {
-        clearInterval(healthCheckIntervalRef.current);
-      }
-      
-      // Force a small delay to let WebRTC hooks reinitialize
-      setTimeout(() => {
-        console.log('♟️ [ChessGameView] Cleanup complete - room should reconnect');
-      }, 100);
-    };
-  }, []);
+  const forcePlayVideo = () => {
+    if (chessOpponentVideoRef.current) {
+      chessOpponentVideoRef.current.play();
+    }
+  };
 
-  // ✅ Check if opponent stream exists
-  const hasOpponentStream = remoteStreams.has(opponentId);
+  const hasOpponentStream = opponentStreamRef.current !== null;
 
   return (
     <div className="fixed inset-0 z-50 bg-background flex flex-col">
@@ -388,10 +625,34 @@ export function ChessGameView({
         </div>
       )}
 
-      {/* Header - ✅ REMOVED BACK BUTTON */}
+      {/* Header */}
       <header className="flex items-center justify-between p-2 md:p-4 border-b border-border">
         <Logo size="sm" />
         <div className="flex items-center gap-2 md:gap-4">
+          <div className={cn(
+            "flex items-center gap-2 glass rounded-full px-3 py-1.5 md:px-4 md:py-2",
+            isOpponentConnected 
+              ? "bg-green-500/20 text-green-600" 
+              : "bg-yellow-500/20 text-yellow-600"
+          )}>
+            {isOpponentConnected ? (
+              <>
+                <div className="w-2 h-2 rounded-full bg-green-500" />
+                <span className="text-xs md:text-sm font-medium">Connected</span>
+              </>
+            ) : (
+              <>
+                <Loader2 className="w-3 h-3 md:w-4 md:h-4 animate-spin" />
+                <span className="text-xs md:text-sm font-medium">{connectionStatus}</span>
+              </>
+            )}
+            {retryCount > 0 && (
+              <span className="text-[10px] text-muted-foreground">
+                ({retryCount}/3)
+              </span>
+            )}
+          </div>
+          
           <div className="flex items-center gap-2 glass rounded-full px-3 py-1.5 md:px-4 md:py-2">
             {isBetMatch ? (
               <>
@@ -424,13 +685,13 @@ export function ChessGameView({
             myUserId={myUserId}
             myColor={myColor}
             opponentName={opponentName}
+            opponentId={opponentId} // ✅ Pass opponentId
             onClose={onClose}
             isEmbedded={true}
             originalRoomId={originalRoomId}
             isBetMatch={isBetMatch}
             betAmount={betAmount}
             onGameEnd={(winner, message) => {
-              // Trigger win alert
               setGameResult({
                 showAlert: true,
                 winner,
@@ -468,25 +729,28 @@ export function ChessGameView({
             "relative rounded-xl overflow-hidden bg-card shadow-lg aspect-video",
             isBetMatch && "ring-2 ring-amber-500/30"
           )}>
-            {/* ✅ Enhanced loading overlay with retry button */}
-            {!isOpponentStreamReady && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-muted/30 z-10">
-                <Loader2 className="w-8 h-8 text-primary animate-spin mb-2" />
-                <p className="text-xs text-muted-foreground mb-2">
-                  {hasOpponentStream ? 'Connecting video...' : 'Waiting for opponent...'}
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    if (attachOpponentStream.current) {
-                      attachOpponentStream.current();
-                    }
-                  }}
-                  className="text-xs"
-                >
-                  Retry Connection
-                </Button>
+            {!isOpponentConnected && (
+              <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-10">
+                <div className="text-center p-6">
+                  <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                  <p className="text-white text-lg mb-2">{connectionStatus}</p>
+                  <p className="text-gray-400">
+                    {myColor === 'white' ? 'Initiating connection...' : 'Waiting for connection...'}
+                  </p>
+                  {retryCount > 0 && (
+                    <p className="text-yellow-400 text-sm mt-2">
+                      Auto-retrying... ({retryCount}/3)
+                    </p>
+                  )}
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    className="mt-4 text-white border-gray-600"
+                    onClick={restartChessConnection}
+                  >
+                    Retry Connection
+                  </Button>
+                </div>
               </div>
             )}
             
@@ -495,23 +759,8 @@ export function ChessGameView({
               autoPlay
               playsInline
               muted={isSpeakerOff}
-              className="w-full h-full object-cover"
-              onLoadedMetadata={() => {
-                console.log('✅ Desktop opponent video metadata loaded');
-              }}
-              onPlay={() => {
-                console.log('✅ Desktop opponent video playing');
-                setIsOpponentStreamReady(true);
-              }}
-              onPause={() => {
-                console.log('⏸️ Desktop opponent video paused');
-              }}
-              onStalled={() => {
-                console.warn('⚠️ Desktop opponent video stalled, retrying...');
-                if (attachOpponentStream.current) {
-                  setTimeout(() => attachOpponentStream.current!(), 500);
-                }
-              }}
+              className="w-full h-full object-cover bg-gray-800"
+              onClick={forcePlayVideo}
             />
             <div className="absolute bottom-2 left-2 glass rounded-full px-3 py-1">
               <span className="text-xs font-medium">{opponentName}</span>
@@ -613,10 +862,9 @@ export function ChessGameView({
               ? "ring-2 ring-amber-500/50" 
               : "ring-2 ring-primary/30"
           )}>
-            {/* ✅ Enhanced loading overlay */}
-            {!isOpponentStreamReady && (
-              <div className="absolute inset-0 flex items-center justify-center bg-muted/40 z-10">
-                <Loader2 className="w-6 h-6 text-primary animate-spin" />
+            {!isOpponentConnected && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10 rounded-full">
+                <Loader2 className="w-6 h-6 text-white animate-spin" />
               </div>
             )}
             
@@ -626,16 +874,6 @@ export function ChessGameView({
               playsInline
               muted={isSpeakerOff}
               className="w-full h-full object-cover scale-150"
-              onPlay={() => {
-                console.log('✅ Mobile opponent video playing');
-                setIsOpponentStreamReady(true);
-              }}
-              onStalled={() => {
-                console.warn('⚠️ Mobile opponent video stalled');
-                if (attachOpponentStream.current) {
-                  setTimeout(() => attachOpponentStream.current!(), 500);
-                }
-              }}
             />
             <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent pointer-events-none" />
             <div className="absolute bottom-0.5 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-sm rounded-full px-1.5 py-0.5">
@@ -670,7 +908,7 @@ export function ChessGameView({
               )}
             />
             {isVideoOff && (
-              <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-primary/20 to-muted">
+              <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-primary/20 to-muted rounded-full">
                 <span className="text-xl sm:text-2xl font-bold text-primary">
                   {displayName?.[0]?.toUpperCase()}
                 </span>

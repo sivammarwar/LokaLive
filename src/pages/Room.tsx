@@ -127,8 +127,10 @@ export default function Room() {
   const [isSearchingNextRoom, setIsSearchingNextRoom] = useState(false);
   
   // Connection status tracking
-  const [isMediaReady, setIsMediaReady] = useState(false);
-  const [isRoomReady, setIsRoomReady] = useState(false);
+// Connection status tracking
+const [isMediaReady, setIsMediaReady] = useState(false);
+const [isRoomReady, setIsRoomReady] = useState(false);
+const [isReturning, setIsReturning] = useState(false); // ✅ ADD THIS
   
   // Kick Vote State
   const [activeKickVote, setActiveKickVote] = useState<KickVote | null>(null);
@@ -901,7 +903,37 @@ export default function Room() {
 // Room.tsx Part 6/12 - Media Control Handlers
 // ✅ Using useCallback for stable function refs
 // ============================================
+  // ✅ NEW: Listen for opponent returning from chess
+  useEffect(() => {
+    if (!activeChessGame) return;
 
+    console.log('🎯 Setting up chess return listener');
+
+    const channel = supabase
+      .channel(`chess-end-${activeChessGame.gameId}`)
+      .on('broadcast', { event: 'player-returning' }, (payload) => {
+        const { userId: returnUserId, newRoomId, playerName } = payload.payload;
+        
+        console.log('🔔 Received return broadcast:', { returnUserId, newRoomId, playerName });
+        
+        // If opponent is returning and we haven't returned yet
+        if (returnUserId !== userId && newRoomId && !isReturning) {
+          console.log('👥 Opponent returned to room:', newRoomId);
+          toast.info(`${playerName} returned to room`);
+          
+          // Automatically follow them to the same room
+          setTimeout(() => {
+            console.log('🚀 Following opponent to room:', newRoomId);
+            window.location.href = `/room/${newRoomId}`;
+          }, 1000);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeChessGame, userId, isReturning]);
   // Toggle microphone mute
   const toggleMute = useCallback(() => {
     if (localStream) {
@@ -1108,7 +1140,7 @@ const handleNextRoom = useCallback(async () => {
     return;
   }
   
-  // Gender validation
+  // ✅ FIX: Get user's gender from database (not store)
   let userGender = gender;
   
   if (!userGender || userGender === 'other') {
@@ -1120,7 +1152,7 @@ const handleNextRoom = useCallback(async () => {
         .single();
       
       if (userError || !userData || userData.gender === 'other' || !userData.gender) {
-        toast.error('Please set your gender to Male or Female');
+        toast.error('Please set your gender to Male or Female in your profile');
         navigate('/profile');
         return;
       }
@@ -1133,15 +1165,13 @@ const handleNextRoom = useCallback(async () => {
   }
   
   if (userGender !== 'male' && userGender !== 'female') {
-    toast.error('Please set your gender to Male or Female');
+    toast.error('Please set your gender to Male or Female in your profile');
     navigate('/profile');
     return;
   }
 
   try {
-    // ============================================
-    // STEP 1: COMPLETE CLEANUP (Critical Fix)
-    // ============================================
+    // STEP 1: Complete cleanup
     setNextRoomStatus({ 
       isSearching: true, 
       message: 'Leaving current room...' 
@@ -1149,16 +1179,16 @@ const handleNextRoom = useCallback(async () => {
     
     console.log('🧹 [Next Room] Step 1: Complete cleanup');
     
-    // ✅ FIX #1: Stop ALL media tracks
+    // Stop media tracks
     if (localStream) {
       localStream.getTracks().forEach(track => {
         track.stop();
         console.log('🛑 Stopped track:', track.kind, track.id);
       });
-      setLocalStream(null); // ✅ Clear state
+      setLocalStream(null);
     }
     
-    // ✅ FIX #2: Close ALL peer connections
+    // Close peer connections
     if (peerConnectionsRef?.current) {
       console.log('🔌 Closing peer connections:', peerConnectionsRef.current.size);
       peerConnectionsRef.current.forEach((pc, peerId) => {
@@ -1168,7 +1198,7 @@ const handleNextRoom = useCallback(async () => {
       peerConnectionsRef.current.clear();
     }
     
-    // ✅ FIX #3: Signal leave via WebRTC (with timeout)
+    // Signal leave
     try {
       await Promise.race([
         announceLeave(),
@@ -1181,7 +1211,7 @@ const handleNextRoom = useCallback(async () => {
       console.warn('⚠️ Announce leave timeout (continuing):', err);
     }
     
-    // ✅ FIX #4: Database cleanup with retry
+    // Database cleanup with retry
     let leaveAttempts = 0;
     const maxAttempts = 2;
     
@@ -1206,12 +1236,10 @@ const handleNextRoom = useCallback(async () => {
       }
     }
     
-    // ✅ FIX #5: Longer delay for cleanup to propagate
+    // Wait for cleanup to propagate
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    // ============================================
-    // STEP 2: Find new room with validation
-    // ============================================
+    // STEP 2: Find new room
     setNextRoomStatus({ 
       isSearching: true, 
       message: 'Finding match...' 
@@ -1219,11 +1247,12 @@ const handleNextRoom = useCallback(async () => {
     
     console.log('🔍 [Next Room] Step 2: Finding room');
     
+    // ✅ CRITICAL FIX: Use the correct database function
     const { data: matchData, error: matchError } = await supabase.rpc(
       'find_compatible_room_simple',
       {
         p_user_id: userId,
-        p_user_gender: userGender,
+        p_user_gender: userGender as any, // Cast to match database type
         p_room_size: roomData.room_size
       }
     );
@@ -1247,9 +1276,7 @@ const handleNextRoom = useCallback(async () => {
 
     console.log(`✅ [Next Room] ${isNewRoom ? 'Created' : 'Found'} room:`, newRoomId);
     
-    // ============================================
-    // STEP 3: Join new room with validation
-    // ============================================
+    // STEP 3: Join new room
     setNextRoomStatus({ 
       isSearching: true, 
       message: 'Joining room...' 
@@ -1257,7 +1284,7 @@ const handleNextRoom = useCallback(async () => {
     
     console.log('🚪 [Next Room] Step 3: Joining');
     
-    // ✅ FIX #6: Verify room before joining
+    // Verify room before joining
     const { data: roomCheck, error: roomCheckError } = await supabase
       .from('rooms')
       .select('id, is_active, room_size')
@@ -1269,7 +1296,7 @@ const handleNextRoom = useCallback(async () => {
       throw new Error('Room no longer available');
     }
     
-    // Now join
+    // Join the room
     const { data: joinData, error: joinError } = await supabase.rpc(
       'join_room_if_available',
       {
@@ -1288,16 +1315,13 @@ const handleNextRoom = useCallback(async () => {
     if (!joinResult.success && !joinResult.message?.includes('already')) {
       if (joinResult.error === 'room_full') {
         console.log('⚠️ Room full, retrying...');
-        // Retry with small delay
         await new Promise(resolve => setTimeout(resolve, 300));
         return handleNextRoom(); // Recursive retry
       }
       throw new Error(joinResult.message || 'Failed to join');
     }
 
-    // ============================================
-    // STEP 4: Clean state and navigate
-    // ============================================
+    // STEP 4: Navigate
     console.log('✅ [Next Room] Success, navigating...');
     
     toast.success(
@@ -1306,29 +1330,26 @@ const handleNextRoom = useCallback(async () => {
         : 'Match found!'
     );
     
-    // ✅ FIX #7: Clear ALL state
+    // Clear state
     setActiveChessGame(null);
     setFullscreenUserId(null);
     setPendingChessInvite(null);
     setActiveKickVote(null);
     setShowKickVoteModal(false);
     
-    // Small delay
     await new Promise(resolve => setTimeout(resolve, 200));
     
-    // ✅ FIX #8: Force page refresh on navigation to ensure clean state
+    // Force page refresh for clean state
     window.location.href = `/room/${newRoomId}`;
     
   } catch (error: any) {
     console.error('❌ [Next Room] Error:', error);
     
-    // Error handling
     if (error.message?.includes('gender')) {
       toast.error('Please update your gender in profile');
       navigate('/profile');
     } else if (error.message?.includes('no longer available')) {
       toast.error('Room was closed. Finding another...');
-      // Auto-retry once
       setTimeout(() => {
         setNextRoomStatus({ isSearching: false, message: '' });
         handleNextRoom();
@@ -1338,12 +1359,10 @@ const handleNextRoom = useCallback(async () => {
       toast.error('Failed to find next room');
     }
     
-    // Fallback
     await new Promise(resolve => setTimeout(resolve, 500));
     navigate('/create-room', { replace: true });
     
   } finally {
-    // Only clear loading if we're not retrying
     if (!nextRoomStatus.message.includes('Retrying')) {
       setNextRoomStatus({ isSearching: false, message: '' });
     }
@@ -1357,7 +1376,7 @@ const handleNextRoom = useCallback(async () => {
   roomId, 
   navigate,
   nextRoomStatus.isSearching,
-  peerConnectionsRef // ✅ Include peer connections ref
+  peerConnectionsRef
 ]);
   // ============================================
 // Room.tsx Part 8/12 - Kick Vote Handlers
@@ -1783,39 +1802,93 @@ const handleNextRoom = useCallback(async () => {
 
   // Return from chess game to original room
   // Return from chess game to original room
+  // ============================================
+// Return from chess game - UPDATED LOGIC
+// ============================================
   const returnToOriginalRoom = useCallback(async () => {
     if (!activeChessGame) return;
     
-    console.log('🔙 Returning to original room...');
+    console.log('🔙 Returning from chess game...');
     
     try {
-      // Clear chess game state first
+      setIsReturning(true);
+      setGameResult({ showAlert: false, winner: null, message: '' });
+      
+      // Call database function
+      const { data: returnData, error: returnError } = await supabase.rpc(
+        'return_from_chess_to_appropriate_room',
+        {
+          p_game_id: activeChessGame.gameId,
+          p_user_id: userId
+        }
+      );
+      
+      if (returnError) {
+        console.error('❌ Error returning from chess:', returnError);
+        toast.error('Error returning to room');
+        navigate('/create-room');
+        return;
+      }
+      
+      const result = returnData as {
+        success: boolean;
+        new_room_id?: string;
+        room_size?: number;
+        is_new_room?: boolean;
+        message?: string;
+        error?: string;
+      };
+      
+      if (!result.success) {
+        console.error('❌ Return failed:', result.error);
+        toast.error('Could not return to room');
+        navigate('/create-room');
+        return;
+      }
+      
+      console.log('✅ Chess return result:', result);
+      
+      // ✅ CRITICAL: Broadcast to opponent with new room ID
+      const chessChannel = supabase.channel(`chess-end-${activeChessGame.gameId}`);
+      await chessChannel.send({
+        type: 'broadcast',
+        event: 'player-returning',
+        payload: {
+          gameId: activeChessGame.gameId,
+          userId: userId,
+          newRoomId: result.new_room_id,
+          playerName: displayName
+        }
+      });
+      
+      toast.success(result.message || 'Returning to room...');
+      
+      // Clear chess state
       setActiveChessGame(null);
+      setFullscreenUserId(null);
+      setPendingChessInvite(null);
+      setActiveKickVote(null);
+      setShowKickVoteModal(false);
       
-      // Wait a bit for state to clear
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // Small delay for broadcast to propagate
+      await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Update database
-      await supabase
-        .from('room_participants')
-        .update({ left_at: new Date().toISOString() })
-        .eq('room_id', activeChessGame.chessRoomId)
-        .eq('user_id', userId)
-        .is('left_at', null);
-      
-      console.log('✅ Chess room left, returning to main room');
-      toast.success('Returned to room');
-      
-      // ✅ CRITICAL: Force a small delay to let WebRTC reinitialize
-      setTimeout(() => {
-        console.log('✅✅✅ Room should now reconnect video streams');
-      }, 500);
+      // Navigate to the new room
+      if (result.new_room_id) {
+        console.log('🎯 Navigating to room:', result.new_room_id);
+        window.location.href = `/room/${result.new_room_id}`;
+      } else {
+        navigate('/create-room');
+      }
       
     } catch (error) {
-      console.error('❌ Error returning to room:', error);
+      console.error('❌ Error in returnToOriginalRoom:', error);
       toast.error('Error returning to room');
+      navigate('/create-room');
+    }finally {
+      setIsReturning(false); // ✅ ADD THIS
     }
-  }, [activeChessGame, userId]);
+  }, [activeChessGame, userId, displayName, navigate]);
   // ============================================
 // Room.tsx Part 11/12 - Loading States, Styles & Modals
 // ✅ No changes needed
