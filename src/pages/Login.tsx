@@ -1,12 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Logo } from '@/components/Logo';
 import { useUserStore } from '@/lib/userStore';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
-import { Users, Video, Shield, Mail, Key } from 'lucide-react';
+import { Users, Video, Shield, Mail, Key, Crown, Lock, Globe, UserPlus, Zap, Grid, Sparkles } from 'lucide-react';
 
 type LoginStep = 'EMAIL_INPUT' | 'OTP_VERIFICATION' | 'DISPLAY_NAME_INPUT';
 
@@ -44,14 +41,12 @@ export default function Login() {
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   };
 
-  const handleSendOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendOtp = async () => {
     if (!email.trim()) {
       toast.error('Please enter your email.');
       return;
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email.trim())) {
       toast.error('Please enter a valid email address.');
@@ -60,12 +55,10 @@ export default function Login() {
 
     setIsLoading(true);
     try {
-      // Use signInWithOtp which sends OTP instead of magic link
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
         options: {
           shouldCreateUser: true,
-          // This ensures we get OTP email, not magic link
           emailRedirectTo: undefined,
         },
       });
@@ -82,8 +75,7 @@ export default function Login() {
     }
   };
 
-  const handleVerifyOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleVerifyOtp = async () => {
     if (!otp.trim() || otp.trim().length !== 6) {
       toast.error('Please enter the complete 6-digit code.');
       return;
@@ -102,7 +94,6 @@ export default function Login() {
         throw new Error(error?.message || 'Verification failed');
       }
 
-      // Store verified user data and move to display name input
       setVerifiedUser(data.user);
       toast.success('Code verified! Choose your display name.');
       setStep('DISPLAY_NAME_INPUT');
@@ -122,15 +113,13 @@ export default function Login() {
       }
       
       toast.error(errorMessage);
-      // Don't reset to EMAIL_INPUT, let user try again with same email
       setOtp('');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleCompleteLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCompleteLogin = async () => {
     if (!displayName.trim()) {
       toast.error('Please enter a display name.');
       return;
@@ -154,7 +143,6 @@ export default function Login() {
       const sessionToken = crypto.randomUUID();
       const fingerprint = await generateFingerprint();
 
-      // Fetch user profile from users table
       const { data: userProfiles, error: profileError } = await supabase
         .from('users')
         .select('id, display_name, email, is_permanently_banned, banned_until, health_tokens, gender')
@@ -167,7 +155,6 @@ export default function Login() {
       let userProfile = userProfiles && userProfiles.length > 0 ? userProfiles[0] : null;
 
       if (userProfile) {
-        // Check ban status
         if (userProfile.is_permanently_banned) {
           await supabase.auth.signOut();
           toast.error('Your account has been permanently suspended.');
@@ -183,7 +170,6 @@ export default function Login() {
           return;
         }
 
-        // Update session and fingerprint
         const { error: updateError } = await supabase
           .from('users')
           .update({
@@ -208,7 +194,6 @@ export default function Login() {
         toast.success(`Welcome back, ${displayName.trim()}!`);
         navigate('/create-room');
       } else {
-        // No user profile exists - create one
         console.log('Creating new user profile...');
         
         const { data: newProfile, error: insertError } = await supabase
@@ -226,7 +211,6 @@ export default function Login() {
 
         if (insertError) {
           console.error('Insert error:', insertError);
-          // Retry fetch in case of race condition
           await new Promise(resolve => setTimeout(resolve, 500));
           
           const { data: retryProfile } = await supabase
@@ -276,216 +260,388 @@ export default function Login() {
     }
   };
 
-  const renderFormContent = () => {
-    switch (step) {
-      case 'EMAIL_INPUT':
-        return (
-          <form onSubmit={handleSendOtp} className="space-y-4">
-            <div className="space-y-2">
-              <label htmlFor="email" className="text-sm font-medium text-foreground">
-                Enter your email address
-              </label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="email"
-                autoFocus
-                disabled={isLoading}
-              />
-              <p className="text-xs text-muted-foreground">
-                We'll send a 6-digit code to verify your identity.
-              </p>
-            </div>
-
-            <Button
-              type="submit"
-              variant="hero"
-              size="xl"
-              className="w-full"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <div className="flex items-center gap-2">
-                  <div className="w-5 h-5 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                  Sending Code...
-                </div>
-              ) : (
-                <>
-                  <Mail className="h-5 w-5" />
-                  Continue with Email
-                </>
-              )}
-            </Button>
-          </form>
-        );
-
-      case 'OTP_VERIFICATION':
-        return (
-          <form onSubmit={handleVerifyOtp} className="space-y-4">
-            <div className="space-y-2">
-              <label htmlFor="otp" className="text-sm font-medium text-foreground">
-                Enter the 6-digit code
-              </label>
-              <Input
-                id="otp"
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                placeholder="000000"
-                value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                maxLength={6}
-                autoComplete="one-time-code"
-                autoFocus
-                disabled={isLoading}
-                className="text-center text-3xl tracking-[0.5em] font-mono"
-              />
-              <p className="text-xs text-muted-foreground">
-                Code sent to <strong>{email}</strong>. Expires in 60 seconds.
-                <button 
-                  type="button" 
-                  onClick={() => {
-                    setStep('EMAIL_INPUT');
-                    setOtp('');
-                  }}
-                  className="ml-1 text-primary hover:underline font-medium"
-                  disabled={isLoading}
-                >
-                  Change email
-                </button>
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Button
-                type="submit"
-                variant="hero"
-                size="xl"
-                className="w-full"
-                disabled={isLoading || otp.length !== 6}
-              >
-                {isLoading ? (
-                  <div className="flex items-center gap-2">
-                    <div className="w-5 h-5 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                    Verifying...
-                  </div>
-                ) : (
-                  <>
-                    <Key className="h-5 w-5" />
-                    Verify Code
-                  </>
-                )}
-              </Button>
-              
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="w-full text-xs"
-                onClick={handleSendOtp}
-                disabled={isLoading}
-              >
-                Didn't receive code? Resend
-              </Button>
-            </div>
-          </form>
-        );
-
-      case 'DISPLAY_NAME_INPUT':
-        return (
-          <form onSubmit={handleCompleteLogin} className="space-y-4">
-            <div className="space-y-2">
-              <label htmlFor="displayName" className="text-sm font-medium text-foreground">
-                Choose your display name
-              </label>
-              <Input
-                id="displayName"
-                type="text"
-                placeholder="Enter your name"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                maxLength={30}
-                autoFocus
-                disabled={isLoading}
-              />
-              <p className="text-xs text-muted-foreground">
-                This is how others will see you in chat rooms. You can change it anytime.
-              </p>
-            </div>
-
-            <Button
-              type="submit"
-              variant="hero"
-              size="xl"
-              className="w-full"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <div className="flex items-center gap-2">
-                  <div className="w-5 h-5 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
-                  Completing...
-                </div>
-              ) : (
-                <>
-                  <Users className="h-5 w-5" />
-                  Start Chatting
-                </>
-              )}
-            </Button>
-          </form>
-        );
-        
-      default:
-        return null;
-    }
-  };
-
   const features = [
-    { icon: Video, title: 'Video Chat', description: 'Crystal clear video calls' },
-    { icon: Users, title: 'Meet People', description: 'Connect globally by interests' },
-    { icon: Shield, title: 'Moderated', description: 'Safe & healthy community' },
+    { 
+      icon: Users, 
+      title: '2 & 4 Person Rooms', 
+      desc: 'Random video chat with multiple people',
+      color: 'from-blue-500 to-cyan-500'
+    },
+    { 
+      icon: Lock, 
+      title: 'Private Rooms', 
+      desc: 'Custom codes & screen sharing',
+      color: 'from-purple-500 to-pink-500'
+    },
+    { 
+      icon: Grid, 
+      title: 'Chess Battles', 
+      desc: 'Play chess with diamond betting',
+      color: 'from-green-500 to-emerald-500'
+    },
+    { 
+      icon: Crown, 
+      title: 'Premium Plus', 
+      desc: 'Priority matching & live counters',
+      color: 'from-yellow-500 to-orange-500'
+    },
   ];
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-4 relative overflow-hidden">
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 -left-32 w-64 h-64 bg-primary/10 rounded-full blur-[100px]" />
-        <div className="absolute bottom-1/4 -right-32 w-96 h-96 bg-accent/10 rounded-full blur-[120px]" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-primary/5 rounded-full blur-[150px]" />
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900 text-white overflow-auto">
+      {/* Animated Background */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-500/20 rounded-full blur-[150px] animate-pulse" />
+        <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-purple-500/20 rounded-full blur-[150px] animate-pulse" style={{ animationDelay: '1s' }} />
+        <div className="absolute top-1/2 left-1/2 w-96 h-96 bg-pink-500/20 rounded-full blur-[150px] animate-pulse" style={{ animationDelay: '2s' }} />
       </div>
 
-      <div className="w-full max-w-md space-y-8 relative z-10 animate-slide-up">
-        <div className="text-center space-y-4">
-          <Logo size="xl" className="justify-center" />
-          <p className="text-muted-foreground text-lg">
-            Anonymous video chat, reimagined.
-          </p>
-        </div>
-
-        <div className="glass-strong rounded-2xl p-8 space-y-6 shadow-2xl">
-          {renderFormContent()}
-        </div>
-
-        <div className="grid grid-cols-3 gap-4">
-          {features.map((feature) => (
-            <div
-              key={feature.title}
-              className="glass rounded-xl p-4 text-center space-y-2 hover:border-primary/30 transition-colors"
-            >
-              <feature.icon className="h-6 w-6 mx-auto text-primary" />
-              <h3 className="font-semibold text-sm">{feature.title}</h3>
-              <p className="text-xs text-muted-foreground">{feature.description}</p>
+      {/* Hero Section */}
+      <div className="relative z-10 container mx-auto px-4 py-8">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-12">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center transform hover:scale-110 transition-transform">
+              <Video className="w-7 h-7" />
             </div>
-          ))}
+            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+              Loka
+            </h1>
+          </div>
+          <div className="flex gap-2">
+            <span className="px-4 py-2 bg-white/10 backdrop-blur-lg rounded-full text-sm font-medium border border-white/20">
+              <Zap className="w-4 h-4 inline mr-1" />
+              Next-Gen Chat
+            </span>
+          </div>
         </div>
 
-        <p className="text-center text-xs text-muted-foreground">
-          By continuing, you agree to maintain a healthy community. 
-          <br />Violations may result in account suspension.
-        </p>
+        <div className="grid lg:grid-cols-2 gap-12 items-center max-w-7xl mx-auto">
+          {/* Left Side - Hero Content */}
+          <div className="space-y-8 order-2 lg:order-1">
+            <div className="space-y-4">
+              <div className="inline-block px-4 py-2 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-full border border-blue-400/30 backdrop-blur-sm">
+                <span className="text-sm font-semibold bg-gradient-to-r from-blue-300 to-purple-300 bg-clip-text text-transparent">
+                  ✨ Better than Omegle
+                </span>
+              </div>
+              
+              <h2 className="text-5xl md:text-6xl font-bold leading-tight">
+                Random Video Chat
+                <span className="block bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+                  Reimagined
+                </span>
+              </h2>
+              
+              <p className="text-xl text-gray-300 leading-relaxed">
+                Meet new people worldwide with advanced features, premium matchmaking, and seamless video quality. Join millions in the next generation of anonymous chat.
+              </p>
+            </div>
+
+            {/* Feature Cards */}
+            <div className="grid grid-cols-2 gap-4">
+              {features.map((feature, idx) => (
+                <div
+                  key={idx}
+                  className="group p-5 rounded-2xl bg-white/5 backdrop-blur-sm border border-white/10 hover:border-white/30 transition-all duration-300 hover:transform hover:scale-105"
+                >
+                  <div className={`w-12 h-12 rounded-xl bg-gradient-to-br ${feature.color} flex items-center justify-center mb-3 group-hover:scale-110 transition-transform`}>
+                    <feature.icon className="w-6 h-6" />
+                  </div>
+                  <h3 className="font-bold text-sm mb-1">{feature.title}</h3>
+                  <p className="text-xs text-gray-400">{feature.desc}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Stats */}
+            <div className="flex gap-8 pt-4">
+              <div>
+                <div className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                  100K+
+                </div>
+                <div className="text-sm text-gray-400">Active Users</div>
+              </div>
+              <div>
+                <div className="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
+                  4.9/5
+                </div>
+                <div className="text-sm text-gray-400">User Rating</div>
+              </div>
+              <div>
+                <div className="text-3xl font-bold bg-gradient-to-r from-pink-400 to-red-400 bg-clip-text text-transparent">
+                  24/7
+                </div>
+                <div className="text-sm text-gray-400">Live Support</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Side - Login Form */}
+          <div className="order-1 lg:order-2">
+            <div className="relative">
+              {/* Glow effect */}
+              <div className="absolute -inset-1 bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 rounded-3xl blur-xl opacity-50 animate-pulse" />
+              
+              {/* Form Card */}
+              <div className="relative bg-gray-900/90 backdrop-blur-xl rounded-3xl p-8 border border-white/10 shadow-2xl">
+                <div className="text-center mb-8">
+                  <h3 className="text-2xl font-bold mb-2">Get Started</h3>
+                  <p className="text-gray-400">Join the conversation in seconds</p>
+                </div>
+
+                {step === 'EMAIL_INPUT' && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Email Address</label>
+                      <div className="relative">
+                        <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                        <input
+                          type="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && handleSendOtp()}
+                          placeholder="you@example.com"
+                          className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-2xl focus:border-blue-500 focus:outline-none transition-colors text-white placeholder-gray-500"
+                          disabled={isLoading}
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleSendOtp}
+                      disabled={isLoading || !email}
+                      className="w-full py-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-2xl font-semibold transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
+                    >
+                      {isLoading ? (
+                        <div className="flex items-center justify-center gap-2">
+                          <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Sending Code...
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-2">
+                          <Mail className="w-5 h-5" />
+                          Continue with Email
+                        </div>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {step === 'OTP_VERIFICATION' && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Enter 6-Digit Code</label>
+                      <div className="relative">
+                        <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                        <input
+                          type="text"
+                          value={otp}
+                          onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          onKeyDown={(e) => e.key === 'Enter' && handleVerifyOtp()}
+                          placeholder="000000"
+                          maxLength={6}
+                          className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-2xl text-center text-3xl font-mono tracking-[0.5em] focus:border-blue-500 focus:outline-none text-white"
+                          disabled={isLoading}
+                        />
+                      </div>
+                      <p className="text-xs text-gray-400 mt-2 text-center">
+                        Sent to <strong>{email}</strong>
+                        <button 
+                          onClick={() => {
+                            setStep('EMAIL_INPUT');
+                            setOtp('');
+                          }}
+                          className="ml-2 text-blue-400 hover:underline"
+                          disabled={isLoading}
+                        >
+                          Change email
+                        </button>
+                      </p>
+                    </div>
+
+                    <button
+                      onClick={handleVerifyOtp}
+                      disabled={isLoading || otp.length !== 6}
+                      className="w-full py-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-2xl font-semibold transition-all transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isLoading ? 'Verifying...' : 'Verify Code'}
+                    </button>
+
+                    <button
+                      onClick={handleSendOtp}
+                      disabled={isLoading}
+                      className="w-full text-sm text-gray-400 hover:text-white transition-colors"
+                    >
+                      Didn't receive code? Resend
+                    </button>
+                  </div>
+                )}
+
+                {step === 'DISPLAY_NAME_INPUT' && (
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-2">Choose Display Name</label>
+                      <div className="relative">
+                        <UserPlus className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                        <input
+                          type="text"
+                          value={displayName}
+                          onChange={(e) => setDisplayName(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && handleCompleteLogin()}
+                          placeholder="Enter your name"
+                          maxLength={30}
+                          className="w-full pl-12 pr-4 py-4 bg-white/5 border border-white/10 rounded-2xl focus:border-blue-500 focus:outline-none text-white placeholder-gray-500"
+                          disabled={isLoading}
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={handleCompleteLogin}
+                      disabled={isLoading || !displayName}
+                      className="w-full py-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-2xl font-semibold transition-all transform hover:scale-105 disabled:opacity-50"
+                    >
+                      {isLoading ? 'Creating Account...' : 'Start Chatting'}
+                    </button>
+                  </div>
+                )}
+
+                <div className="mt-6 flex items-center justify-center gap-2 text-xs text-gray-400">
+                  <Shield className="w-4 h-4" />
+                  <span>Your data is encrypted and secure</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Features Section */}
+        <div className="mt-24 space-y-12">
+          <div className="text-center space-y-4">
+            <h3 className="text-4xl font-bold">Why Choose Loka?</h3>
+            <p className="text-gray-400 text-lg max-w-2xl mx-auto">
+              Experience the most advanced random video chat platform with features designed for modern connections
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-8">
+            <div className="p-8 rounded-3xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 border border-blue-500/20 backdrop-blur-sm hover:transform hover:scale-105 transition-all duration-300">
+              <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-2xl flex items-center justify-center mb-6">
+                <Globe className="w-8 h-8" />
+              </div>
+              <h4 className="text-xl font-bold mb-3">Public Rooms</h4>
+              <p className="text-gray-400">Join 2 or 4-person public rooms with intelligent gender-based matching</p>
+            </div>
+
+            <div className="p-8 rounded-3xl bg-gradient-to-br from-purple-500/10 to-pink-500/10 border border-purple-500/20 backdrop-blur-sm hover:transform hover:scale-105 transition-all duration-300">
+              <div className="w-16 h-16 bg-gradient-to-br from-purple-500 to-pink-500 rounded-2xl flex items-center justify-center mb-6">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h4 className="text-xl font-bold mb-3">Private Rooms</h4>
+              <p className="text-gray-400">Create private rooms with shareable codes plus screen sharing support</p>
+            </div>
+
+            <div className="p-8 rounded-3xl bg-gradient-to-br from-yellow-500/10 to-orange-500/10 border border-yellow-500/20 backdrop-blur-sm hover:transform hover:scale-105 transition-all duration-300">
+              <div className="w-16 h-16 bg-gradient-to-br from-yellow-500 to-orange-500 rounded-2xl flex items-center justify-center mb-6">
+                <Crown className="w-8 h-8" />
+              </div>
+              <h4 className="text-xl font-bold mb-3">Premium Features</h4>
+              <p className="text-gray-400">See active users, priority matching, enhanced reporting & exclusive perks</p>
+            </div>
+          </div>
+
+          {/* Chess Feature Section */}
+          <div className="mt-16 relative">
+            <div className="absolute inset-0 bg-gradient-to-r from-green-500/10 via-emerald-500/10 to-teal-500/10 rounded-3xl blur-3xl" />
+            <div className="relative p-8 md:p-12 rounded-3xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 border border-green-500/20 backdrop-blur-sm">
+              <div className="grid md:grid-cols-2 gap-8 items-center">
+                <div>
+                  <div className="inline-block px-4 py-2 bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-full border border-green-400/30 backdrop-blur-sm mb-4">
+                    <span className="text-sm font-semibold bg-gradient-to-r from-green-300 to-emerald-300 bg-clip-text text-transparent">
+                      ♟️ New Feature
+                    </span>
+                  </div>
+                  <h3 className="text-4xl font-bold mb-4">Play Chess with Strangers</h3>
+                  <p className="text-gray-300 text-lg mb-6">
+                    Challenge your video chat partner to a game of chess. Bet diamonds and win big while having fun!
+                  </p>
+                  <div className="space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-1">
+                        <div className="w-2 h-2 rounded-full bg-green-400" />
+                      </div>
+                      <div>
+                        <h5 className="font-semibold mb-1">Real-time Chess</h5>
+                        <p className="text-sm text-gray-400">Play chess with your video chat partner in real-time</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <div className="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-1">
+                        <div className="w-2 h-2 rounded-full bg-green-400" />
+                      </div>
+                      <div>
+                        <h5 className="font-semibold mb-1">Diamond Betting</h5>
+                        <p className="text-sm text-gray-400">Bet 10-1000 diamonds per game and win double or get refunded on draw</p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3">
+                      <div className="w-6 h-6 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0 mt-1">
+                        <div className="w-2 h-2 rounded-full bg-green-400" />
+                      </div>
+                      <div>
+                        <h5 className="font-semibold mb-1">Seamless Return</h5>
+                        <p className="text-sm text-gray-400">After the game, return to video chat in a private 2-person room</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="relative">
+                  <div className="aspect-square rounded-2xl bg-gradient-to-br from-green-900/50 to-emerald-900/50 border border-green-500/30 p-8 backdrop-blur-sm">
+                    {/* Chess Board Visual */}
+                    <div className="grid grid-cols-8 gap-0 w-full h-full">
+                      {Array.from({ length: 64 }).map((_, i) => {
+                        const row = Math.floor(i / 8);
+                        const col = i % 8;
+                        const isLight = (row + col) % 2 === 0;
+                        return (
+                          <div
+                            key={i}
+                            className={`aspect-square ${
+                              isLight ? 'bg-amber-200/20' : 'bg-green-900/40'
+                            } flex items-center justify-center text-2xl`}
+                          >
+                            {i === 0 && '♜'}
+                            {i === 4 && '♚'}
+                            {i === 7 && '♜'}
+                            {i === 27 && '♟'}
+                            {i === 28 && '♟'}
+                            {i === 35 && '♟'}
+                            {i === 36 && '♟'}
+                            {i === 56 && '♖'}
+                            {i === 60 && '♔'}
+                            {i === 63 && '♖'}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="absolute -bottom-4 -right-4 bg-gradient-to-br from-yellow-500 to-orange-500 rounded-2xl px-6 py-3 shadow-2xl">
+                    <div className="flex items-center gap-2 text-sm font-bold">
+                      <Sparkles className="w-5 h-5" />
+                      <span>Win 2x Diamonds!</span>
+                    </div>
+                  </div>
+                  </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-24 pt-8 border-t border-white/10 text-center text-sm text-gray-400">
+          <p>By continuing, you agree to maintain a safe and respectful community</p>
+        </div>
       </div>
     </div>
   );
