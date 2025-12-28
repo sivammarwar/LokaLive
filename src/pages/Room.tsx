@@ -1140,7 +1140,7 @@ const handleNextRoom = useCallback(async () => {
     return;
   }
   
-  // ✅ FIX: Get user's gender from database (not store)
+  // ✅ Get user's gender from store or database
   let userGender = gender;
   
   if (!userGender || userGender === 'other') {
@@ -1171,13 +1171,12 @@ const handleNextRoom = useCallback(async () => {
   }
 
   try {
-    // STEP 1: Complete cleanup
     setNextRoomStatus({ 
       isSearching: true, 
       message: 'Leaving current room...' 
     });
     
-    console.log('🧹 [Next Room] Step 1: Complete cleanup');
+    console.log('🧹 [Next Room] Cleanup starting');
     
     // Stop media tracks
     if (localStream) {
@@ -1211,48 +1210,37 @@ const handleNextRoom = useCallback(async () => {
       console.warn('⚠️ Announce leave timeout (continuing):', err);
     }
     
-    // Database cleanup with retry
-    let leaveAttempts = 0;
-    const maxAttempts = 2;
+    // Database cleanup
+    const { error: leaveError } = await supabase
+      .from('room_participants')
+      .update({ left_at: new Date().toISOString() })
+      .eq('room_id', roomId)
+      .eq('user_id', userId)
+      .is('left_at', null);
     
-    while (leaveAttempts < maxAttempts) {
-      const { error: leaveError } = await supabase
-        .from('room_participants')
-        .update({ left_at: new Date().toISOString() })
-        .eq('room_id', roomId)
-        .eq('user_id', userId)
-        .is('left_at', null);
-      
-      if (!leaveError) {
-        console.log('✅ Database leave successful');
-        break;
-      }
-      
-      leaveAttempts++;
-      console.warn(`⚠️ Leave attempt ${leaveAttempts} failed:`, leaveError);
-      
-      if (leaveAttempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 300));
-      }
+    if (leaveError) {
+      console.error('❌ Leave error:', leaveError);
+    } else {
+      console.log('✅ Database leave successful');
     }
     
     // Wait for cleanup to propagate
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    // STEP 2: Find new room
+    // Find new room
     setNextRoomStatus({ 
       isSearching: true, 
       message: 'Finding match...' 
     });
     
-    console.log('🔍 [Next Room] Step 2: Finding room');
+    console.log('🔍 [Next Room] Finding room');
     
-    // ✅ CRITICAL FIX: Use the correct database function
+    // ✅ Call the simplified function with TEXT parameter
     const { data: matchData, error: matchError } = await supabase.rpc(
       'find_compatible_room_simple',
       {
         p_user_id: userId,
-        p_user_gender: userGender as any, // Cast to match database type
+        p_user_gender: userGender,  // Send as TEXT
         p_room_size: roomData.room_size
       }
     );
@@ -1276,27 +1264,14 @@ const handleNextRoom = useCallback(async () => {
 
     console.log(`✅ [Next Room] ${isNewRoom ? 'Created' : 'Found'} room:`, newRoomId);
     
-    // STEP 3: Join new room
+    // Join new room
     setNextRoomStatus({ 
       isSearching: true, 
       message: 'Joining room...' 
     });
     
-    console.log('🚪 [Next Room] Step 3: Joining');
+    console.log('🚪 [Next Room] Joining');
     
-    // Verify room before joining
-    const { data: roomCheck, error: roomCheckError } = await supabase
-      .from('rooms')
-      .select('id, is_active, room_size')
-      .eq('id', newRoomId)
-      .single();
-    
-    if (roomCheckError || !roomCheck || !roomCheck.is_active) {
-      console.error('❌ Room validation failed:', roomCheckError);
-      throw new Error('Room no longer available');
-    }
-    
-    // Join the room
     const { data: joinData, error: joinError } = await supabase.rpc(
       'join_room_if_available',
       {
@@ -1321,7 +1296,7 @@ const handleNextRoom = useCallback(async () => {
       throw new Error(joinResult.message || 'Failed to join');
     }
 
-    // STEP 4: Navigate
+    // Navigate
     console.log('✅ [Next Room] Success, navigating...');
     
     toast.success(
@@ -1348,13 +1323,6 @@ const handleNextRoom = useCallback(async () => {
     if (error.message?.includes('gender')) {
       toast.error('Please update your gender in profile');
       navigate('/profile');
-    } else if (error.message?.includes('no longer available')) {
-      toast.error('Room was closed. Finding another...');
-      setTimeout(() => {
-        setNextRoomStatus({ isSearching: false, message: '' });
-        handleNextRoom();
-      }, 500);
-      return;
     } else {
       toast.error('Failed to find next room');
     }

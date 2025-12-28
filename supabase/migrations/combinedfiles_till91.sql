@@ -11102,3 +11102,135 @@ END $$;
 -- VACUUM ANALYZE withdrawal_methods;
 -- VACUUM ANALYZE transactions;
 -- VACUUM ANALYZE ludo_votes;
+
+
+
+----- FILE - 93
+
+
+-- ============================================
+-- 🔧 SIMPLIFIED NEXT ROOM - RANDOM MATCHING
+-- No gender preference, purely random matching
+-- ============================================
+
+DROP FUNCTION IF EXISTS find_compatible_room_simple(UUID, TEXT, INTEGER);
+
+CREATE OR REPLACE FUNCTION find_compatible_room_simple(
+    p_user_id UUID,
+    p_user_gender TEXT,
+    p_room_size INTEGER
+)
+RETURNS TABLE(matched_room_id UUID, is_new_room BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_found_room_id UUID;
+    v_created_room_id UUID;
+    v_gender_enum gender_preference;
+BEGIN
+    -- Validation
+    IF p_user_gender NOT IN ('male', 'female') THEN
+        RAISE EXCEPTION 'Gender must be "male" or "female"';
+    END IF;
+    
+    -- Cast to enum
+    v_gender_enum := p_user_gender::gender_preference;
+    
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 RANDOM MATCHING (No Gender Preference)';
+    RAISE NOTICE 'User: % (Gender: %)', p_user_id, p_user_gender;
+    RAISE NOTICE 'Room Size: %', p_room_size;
+    RAISE NOTICE '========================================';
+    
+    -- Update user's gender
+    UPDATE users 
+    SET gender = v_gender_enum, updated_at = NOW()
+    WHERE id = p_user_id;
+    
+    -- Leave ALL existing rooms
+    UPDATE room_participants
+    SET left_at = NOW()
+    WHERE user_id = p_user_id AND left_at IS NULL;
+    
+    RAISE NOTICE '✅ Left all existing rooms';
+    
+    -- Small delay for cleanup
+    PERFORM pg_sleep(0.1);
+    
+    -- ============================================
+    -- PURE RANDOM MATCHING - NO GENDER FILTER
+    -- ============================================
+    
+    RAISE NOTICE '🔍 Looking for ANY available room (size: %)...', p_room_size;
+    
+    -- Find ANY room with space (completely random)
+    SELECT r.id INTO v_found_room_id
+    FROM rooms r
+    WHERE r.room_type = 'public'
+      AND r.is_active = true
+      AND r.room_size = p_room_size
+      AND r.creator_id != p_user_id
+      AND (
+          SELECT COUNT(*) 
+          FROM room_participants rp
+          WHERE rp.room_id = r.id AND rp.left_at IS NULL
+      ) < p_room_size
+    ORDER BY r.created_at ASC  -- First-come-first-serve
+    LIMIT 1;
+    
+    IF v_found_room_id IS NOT NULL THEN
+        RAISE NOTICE '✅ FOUND available room: %', v_found_room_id;
+        RAISE NOTICE '========================================';
+        RETURN QUERY SELECT v_found_room_id, false;
+        RETURN;
+    END IF;
+    
+    RAISE NOTICE '⚠️ No available room found';
+    
+    -- ============================================
+    -- CREATE NEW ROOM
+    -- ============================================
+    RAISE NOTICE '🏗️ Creating new room...';
+    
+    INSERT INTO rooms (
+        room_type,
+        room_size,
+        gender_preference,
+        interest_category,
+        creator_id,
+        creator_gender,
+        is_active
+    ) VALUES (
+        'public',
+        p_room_size,
+        v_gender_enum,  -- Store gender but don't filter by it
+        'random',
+        p_user_id,
+        v_gender_enum,
+        true
+    ) RETURNING id INTO v_created_room_id;
+    
+    RAISE NOTICE '✅ CREATED room: %', v_created_room_id;
+    RAISE NOTICE '========================================';
+    
+    RETURN QUERY SELECT v_created_room_id, true;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION find_compatible_room_simple(UUID, TEXT, INTEGER) TO authenticated, anon;
+
+-- Verification
+DO $$
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ RANDOM MATCHING ENABLED';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE 'Matching Logic:';
+    RAISE NOTICE '  • Gender stored but NOT used for matching';
+    RAISE NOTICE '  • Purely random room assignment';
+    RAISE NOTICE '  • Works for both 2 and 4 person rooms';
+    RAISE NOTICE '========================================';
+END $$;

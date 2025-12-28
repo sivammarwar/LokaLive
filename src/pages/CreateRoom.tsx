@@ -908,6 +908,9 @@ const handleCreateRoom = async () => {
                   {/* Your Gender */}
                   <div className="space-y-3">
                     <label className="text-sm font-medium">Your Gender</label>
+                    <p className="text-xs text-muted-foreground">
+                      Gender selection is required but matching is completely random
+                    </p>
                     <div className="grid grid-cols-2 gap-4">
                       {genderOptions.map((option) => (
                         <button
