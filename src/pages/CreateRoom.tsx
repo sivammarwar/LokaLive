@@ -391,200 +391,207 @@ useEffect(() => {
   // ============================================
   // MAIN ROOM CREATION HANDLER
   // ============================================
-  const handleCreateRoom = async () => {
-    if (!userId) {
-      toast.error('User ID not found');
-      return;
-    }
-    
-    setIsLoading(true);
-    console.log('🚀 Starting room creation:', {
-      roomType,
-      roomSize,
-      userGender,
-    });
+  // ============================================
+// FIXED: handleCreateRoom function
+// Replace your current handleCreateRoom in CreateRoom.tsx
+// ============================================
 
-    try {
-      if (roomType === 'public') {
-        // PUBLIC ROOM MATCHING
-        console.log('========================================');
-        console.log('🔍 PUBLIC MATCHMAKING REQUEST');
-        console.log('========================================');
-        console.log('User ID:', userId);
-        console.log('My Gender:', userGender);
-        console.log('Room Size:', roomSize);
-        console.log('========================================');
-        
-        // Leave existing rooms
-        console.log('🚪 Leaving existing rooms...');
-        const { data: leftCount } = await supabase
-          .rpc('leave_all_user_rooms', { p_user_id: userId });
-        
-        if (leftCount && leftCount > 0) {
-          console.log(`✅ Left ${leftCount} room(s)`);
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-        
-        toast.info('Searching for compatible matches...');
-        
-        // Find or create room (simplified function)
-        console.log('🔍 Calling find_compatible_room_simple...');
-        
-        // ✅ FIXED: Cast gender to match database type
-        const { data: roomData, error: findError } = await supabase.rpc(
-          'find_compatible_room_simple',
-          {
-            p_user_id: userId,
-            p_user_gender: userGender as any, // TypeScript cast
-            p_room_size: roomSize,
-          }
-        );
+const handleCreateRoom = async () => {
+  if (!userId) {
+    toast.error('User ID not found');
+    return;
+  }
+  
+  setIsLoading(true);
+  console.log('🚀 Starting room creation:', {
+    roomType,
+    roomSize,
+    userGender,
+  });
 
-        if (findError) {
-          console.error('========================================');
-          console.error('❌ MATCHMAKING ERROR');
-          console.error('========================================');
-          console.error('Error:', findError);
-          toast.error(`Matchmaking failed: ${findError.message}`);
-          setIsLoading(false);
-          return;
-        }
-
-        if (!roomData || roomData.length === 0) {
-          console.error('❌ No room returned from matchmaking');
-          toast.error('Failed to create or find room');
-          setIsLoading(false);
-          return;
-        }
-
-        const result = roomData[0];
-        const newRoomId = result.matched_room_id;
-        const isNewRoom = result.is_new_room;
-
-        console.log('========================================');
-        console.log('✅ MATCHMAKING RESULT');
-        console.log('========================================');
-        console.log('Room ID:', newRoomId);
-        console.log('Is New Room:', isNewRoom);
-        console.log('========================================');
-
-        if (!newRoomId) {
-          console.error('❌ No room ID in result:', result);
-          toast.error('Invalid matchmaking result');
-          setIsLoading(false);
-          return;
-        }
-
-        // Join the room
-        console.log('🚪 Joining room...');
-        const { data: joinData, error: joinError } = await supabase.rpc(
-          'join_room_if_available',
-          {
-            p_room_id: newRoomId,
-            p_user_id: userId,
-          }
-        );
-
-        if (joinError) {
-          console.error('❌ Join error:', joinError);
-          toast.error(`Failed to join: ${joinError.message}`);
-          setIsLoading(false);
-          return;
-        }
-
-        const joinResult = joinData as {
-          success: boolean;
-          error?: string;
-          message?: string;
-        };
-
-        console.log('📊 Join result:', joinResult);
-
-        if (!joinResult.success) {
-          if (joinResult.error === 'room_full') {
-            console.log('⚠️ Room full, retrying...');
-            setTimeout(() => {
-              setIsLoading(false);
-              handleCreateRoom();
-            }, 1000);
-            return;
-          }
-          console.error('❌ Join failed:', joinResult.message);
-          toast.error(joinResult.message || 'Failed to join room');
-          setIsLoading(false);
-          return;
-        }
-
-        console.log('✅ Successfully joined room');
-        
-        toast.success(
-          isNewRoom 
-            ? 'Room created! Waiting for match...' 
-            : 'Match found! Connecting...'
-        );
-        
-        await new Promise(resolve => setTimeout(resolve, 800));
-        
-        console.log('🎯 Navigating to room:', newRoomId);
-        console.log('========================================');
-        
-        navigate(`/room/${newRoomId}`, { replace: true });
-      } else {
-        // PRIVATE ROOM CREATION
-        console.log('🔒 Creating private room...');
-        
-        const { data: leftCount } = await supabase
-          .rpc('leave_all_user_rooms', { p_user_id: userId });
-        
-        if (leftCount && leftCount > 0) {
-          console.log(`✅ Left ${leftCount} room(s)`);
-          await new Promise(resolve => setTimeout(resolve, 300));
-        }
-        
-        const { data: room, error } = await supabase
-          .from('rooms')
-          .insert({
-            room_type: 'private',
-            room_size: roomSize,
-            creator_id: userId,
-            is_active: true,
-          })
-          .select()
-          .single();
-
-        if (error) {
-          console.error('❌ Private room creation error:', error);
-          throw error;
-        }
-
-        console.log('✅ Private room created:', room.id);
-
-        const { error: joinError } = await supabase
-          .from('room_participants')
-          .insert({
-            room_id: room.id,
-            user_id: userId,
-          });
-
-        if (joinError && joinError.code !== '23505') {
-          console.error('❌ Join error:', joinError);
-          throw joinError;
-        }
-
-        if (room.room_code) {
-          setGeneratedRoom({ code: room.room_code, id: room.id });
-          toast.success('Private room created!');
-        } else {
-          toast.error('Room code not generated');
-        }
+  try {
+    if (roomType === 'public') {
+      // PUBLIC ROOM MATCHING
+      console.log('========================================');
+      console.log('🔍 PUBLIC MATCHMAKING REQUEST');
+      console.log('========================================');
+      console.log('User ID:', userId);
+      console.log('My Gender:', userGender);
+      console.log('Room Size:', roomSize);
+      console.log('========================================');
+      
+      // Leave existing rooms
+      console.log('🚪 Leaving existing rooms...');
+      const { data: leftCount } = await supabase
+        .rpc('leave_all_user_rooms', { p_user_id: userId });
+      
+      if (leftCount && leftCount > 0) {
+        console.log(`✅ Left ${leftCount} room(s)`);
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
-    } catch (error: any) {
-      console.error('❌ Unhandled error:', error);
-      toast.error(error?.message || 'Failed to create room. Please try again.');
-    } finally {
-      setIsLoading(false);
+      
+      toast.info('Searching for compatible matches...');
+      
+      // ✅ FIX: Call with TEXT parameter (not enum)
+      console.log('🔍 Calling find_compatible_room_simple...');
+      
+      const { data: roomData, error: findError } = await supabase.rpc(
+        'find_compatible_room_simple',
+        {
+          p_user_id: userId,
+          p_user_gender: userGender,  // ✅ Send as string (TEXT)
+          p_room_size: roomSize,
+        }
+      );
+
+      if (findError) {
+        console.error('========================================');
+        console.error('❌ MATCHMAKING ERROR');
+        console.error('========================================');
+        console.error('Error:', findError);
+        console.error('Message:', findError.message);
+        console.error('Details:', findError.details);
+        console.error('Hint:', findError.hint);
+        toast.error(`Matchmaking failed: ${findError.message}`);
+        setIsLoading(false);
+        return;
+      }
+
+      if (!roomData || roomData.length === 0) {
+        console.error('❌ No room returned from matchmaking');
+        toast.error('Failed to create or find room');
+        setIsLoading(false);
+        return;
+      }
+
+      const result = roomData[0];
+      const newRoomId = result.matched_room_id;
+      const isNewRoom = result.is_new_room;
+
+      console.log('========================================');
+      console.log('✅ MATCHMAKING RESULT');
+      console.log('========================================');
+      console.log('Room ID:', newRoomId);
+      console.log('Is New Room:', isNewRoom);
+      console.log('========================================');
+
+      if (!newRoomId) {
+        console.error('❌ No room ID in result:', result);
+        toast.error('Invalid matchmaking result');
+        setIsLoading(false);
+        return;
+      }
+
+      // Join the room
+      console.log('🚪 Joining room...');
+      const { data: joinData, error: joinError } = await supabase.rpc(
+        'join_room_if_available',
+        {
+          p_room_id: newRoomId,
+          p_user_id: userId,
+        }
+      );
+
+      if (joinError) {
+        console.error('❌ Join error:', joinError);
+        toast.error(`Failed to join: ${joinError.message}`);
+        setIsLoading(false);
+        return;
+      }
+
+      const joinResult = joinData as {
+        success: boolean;
+        error?: string;
+        message?: string;
+      };
+
+      console.log('📊 Join result:', joinResult);
+
+      if (!joinResult.success) {
+        if (joinResult.error === 'room_full') {
+          console.log('⚠️ Room full, retrying...');
+          setTimeout(() => {
+            setIsLoading(false);
+            handleCreateRoom();
+          }, 1000);
+          return;
+        }
+        console.error('❌ Join failed:', joinResult.message);
+        toast.error(joinResult.message || 'Failed to join room');
+        setIsLoading(false);
+        return;
+      }
+
+      console.log('✅ Successfully joined room');
+      
+      toast.success(
+        isNewRoom 
+          ? 'Room created! Waiting for match...' 
+          : 'Match found! Connecting...'
+      );
+      
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+      console.log('🎯 Navigating to room:', newRoomId);
+      console.log('========================================');
+      
+      navigate(`/room/${newRoomId}`, { replace: true });
+    } else {
+      // PRIVATE ROOM CREATION (unchanged)
+      console.log('🔒 Creating private room...');
+      
+      const { data: leftCount } = await supabase
+        .rpc('leave_all_user_rooms', { p_user_id: userId });
+      
+      if (leftCount && leftCount > 0) {
+        console.log(`✅ Left ${leftCount} room(s)`);
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      
+      const { data: room, error } = await supabase
+        .from('rooms')
+        .insert({
+          room_type: 'private',
+          room_size: roomSize,
+          creator_id: userId,
+          is_active: true,
+        })
+        .select()
+        .single();
+
+      if (error) {
+        console.error('❌ Private room creation error:', error);
+        throw error;
+      }
+
+      console.log('✅ Private room created:', room.id);
+
+      const { error: joinError } = await supabase
+        .from('room_participants')
+        .insert({
+          room_id: room.id,
+          user_id: userId,
+        });
+
+      if (joinError && joinError.code !== '23505') {
+        console.error('❌ Join error:', joinError);
+        throw joinError;
+      }
+
+      if (room.room_code) {
+        setGeneratedRoom({ code: room.room_code, id: room.id });
+        toast.success('Private room created!');
+      } else {
+        toast.error('Room code not generated');
+      }
     }
-  };
+  } catch (error: any) {
+    console.error('❌ Unhandled error:', error);
+    toast.error(error?.message || 'Failed to create room. Please try again.');
+  } finally {
+    setIsLoading(false);
+  }
+};
 
   // ============================================
   // JOIN PRIVATE ROOM HANDLER

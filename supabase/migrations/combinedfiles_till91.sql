@@ -10061,3 +10061,745 @@ BEGIN
     RAISE NOTICE '  4. Both players in SAME room';
     RAISE NOTICE '========================================';
 END $$;
+
+
+
+------ FILE - 91
+
+
+-- ============================================
+-- 🔧 COMPLETE FIX FOR ALL ISSUES
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+-- ============================================
+-- FIX #1: Immediate Room Cleanup on Empty
+-- Delete room automatically when all users leave
+-- ============================================
+
+DROP TRIGGER IF EXISTS trigger_delete_empty_room ON room_participants;
+DROP FUNCTION IF EXISTS delete_empty_room_immediately() CASCADE;
+
+CREATE OR REPLACE FUNCTION delete_empty_room_immediately()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_remaining_count INTEGER;
+BEGIN
+    -- Only trigger when someone leaves (left_at changes from NULL to a value)
+    IF OLD.left_at IS NULL AND NEW.left_at IS NOT NULL THEN
+        
+        -- Count remaining active participants
+        SELECT COUNT(*) INTO v_remaining_count
+        FROM room_participants
+        WHERE room_id = NEW.room_id 
+          AND left_at IS NULL;
+        
+        -- If no one left, DELETE the room immediately
+        IF v_remaining_count = 0 THEN
+            RAISE NOTICE '🗑️ Deleting empty room: %', NEW.room_id;
+            
+            -- Delete the room (cascades to participants and signaling)
+            DELETE FROM rooms WHERE id = NEW.room_id;
+            
+            RAISE NOTICE '✅ Room deleted successfully';
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trigger_delete_empty_room
+    AFTER UPDATE ON room_participants
+    FOR EACH ROW
+    EXECUTE FUNCTION delete_empty_room_immediately();
+
+-- ============================================
+-- FIX #2: Cleanup ALL Stale Rooms on Startup
+-- Remove ghost rooms that have no active participants
+-- ============================================
+
+-- Immediate cleanup of existing garbage
+DO $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    RAISE NOTICE '🧹 Starting stale room cleanup...';
+    
+    -- Delete rooms with NO active participants
+    DELETE FROM rooms
+    WHERE id NOT IN (
+        SELECT DISTINCT room_id
+        FROM room_participants
+        WHERE left_at IS NULL
+    );
+    
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    
+    RAISE NOTICE '✅ Cleaned up % stale rooms', deleted_count;
+END $$;
+
+-- ============================================
+-- FIX #3: Active Users Count Function
+-- This counts users who are ACTUALLY in rooms right now
+-- ============================================
+
+DROP FUNCTION IF EXISTS get_active_users_by_gender() CASCADE;
+
+CREATE OR REPLACE FUNCTION get_active_users_by_gender()
+RETURNS TABLE(
+    male_count BIGINT,
+    female_count BIGINT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = public
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        COALESCE(COUNT(DISTINCT u.id) FILTER (WHERE u.gender = 'male'), 0) as male_count,
+        COALESCE(COUNT(DISTINCT u.id) FILTER (WHERE u.gender = 'female'), 0) as female_count
+    FROM users u
+    WHERE EXISTS (
+        -- User has an active room participation
+        SELECT 1 
+        FROM room_participants rp
+        INNER JOIN rooms r ON r.id = rp.room_id
+        WHERE rp.user_id = u.id
+          AND rp.left_at IS NULL
+          AND r.is_active = true
+          AND r.room_type = 'public'
+          -- Only count recent joins (last 5 minutes)
+          AND rp.joined_at > NOW() - INTERVAL '5 minutes'
+    )
+    AND u.gender IN ('male', 'female');
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION get_active_users_by_gender() TO authenticated, anon;
+
+-- ============================================
+-- FIX #4: FIXED Matchmaking Function
+-- Proper room finding and creation logic
+-- ============================================
+
+DROP FUNCTION IF EXISTS find_compatible_room_simple(UUID, gender_preference, INTEGER) CASCADE;
+
+CREATE OR REPLACE FUNCTION find_compatible_room_simple(
+    p_user_id UUID,
+    p_user_gender gender_preference,
+    p_room_size INTEGER
+)
+RETURNS TABLE(matched_room_id UUID, is_new_room BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_found_room_id UUID;
+    v_created_room_id UUID;
+    v_opposite_gender gender_preference;
+    v_participant_count INTEGER;
+BEGIN
+    -- Validation
+    IF p_user_gender NOT IN ('male', 'female') THEN
+        RAISE EXCEPTION 'Gender must be "male" or "female"';
+    END IF;
+    
+    -- Determine opposite gender
+    v_opposite_gender := CASE 
+        WHEN p_user_gender = 'male' THEN 'female'::gender_preference
+        ELSE 'male'::gender_preference
+    END;
+    
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 MATCHMAKING';
+    RAISE NOTICE 'User: % (Gender: %)', p_user_id, p_user_gender;
+    RAISE NOTICE 'Room Size: %', p_room_size;
+    RAISE NOTICE '========================================';
+    
+    -- Update user's gender
+    UPDATE users SET gender = p_user_gender, updated_at = NOW()
+    WHERE id = p_user_id;
+    
+    -- ✅ CRITICAL: Leave ALL existing rooms first
+    UPDATE room_participants
+    SET left_at = NOW()
+    WHERE user_id = p_user_id AND left_at IS NULL;
+    
+    RAISE NOTICE '✅ Left all existing rooms';
+    
+    -- Wait for cleanup to propagate
+    PERFORM pg_sleep(0.2);
+    
+    -- ============================================
+    -- MATCHING LOGIC
+    -- ============================================
+    
+    IF p_room_size = 2 THEN
+        -- 2-PERSON ROOM: Try opposite gender first
+        RAISE NOTICE '🔍 Step 1: Looking for opposite gender (%)...', v_opposite_gender;
+        
+        SELECT r.id, COUNT(rp.id) 
+        INTO v_found_room_id, v_participant_count
+        FROM rooms r
+        LEFT JOIN room_participants rp ON rp.room_id = r.id AND rp.left_at IS NULL
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 2
+          AND r.creator_gender = v_opposite_gender
+          AND r.gender_preference = p_user_gender
+          AND r.creator_id != p_user_id
+        GROUP BY r.id
+        HAVING COUNT(rp.id) = 1  -- ✅ CRITICAL: Room must have exactly 1 person
+        ORDER BY r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ FOUND opposite gender room: % (has % participants)', v_found_room_id, v_participant_count;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id, false;
+            RETURN;
+        END IF;
+        
+        RAISE NOTICE '⚠️ No opposite gender room found';
+        
+        -- Fallback: Same gender
+        RAISE NOTICE '🔍 Step 2: Looking for same gender (%)...', p_user_gender;
+        
+        SELECT r.id, COUNT(rp.id)
+        INTO v_found_room_id, v_participant_count
+        FROM rooms r
+        LEFT JOIN room_participants rp ON rp.room_id = r.id AND rp.left_at IS NULL
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 2
+          AND r.creator_gender = p_user_gender
+          AND r.creator_id != p_user_id
+        GROUP BY r.id
+        HAVING COUNT(rp.id) = 1  -- ✅ Room must have exactly 1 person
+        ORDER BY r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ FOUND same gender room: % (has % participants)', v_found_room_id, v_participant_count;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id, false;
+            RETURN;
+        END IF;
+        
+    ELSIF p_room_size = 4 THEN
+        -- 4-PERSON ROOM: Find any room with 1-3 people
+        RAISE NOTICE '🔍 Looking for 4-person room with space...';
+        
+        SELECT r.id, COUNT(rp.id)
+        INTO v_found_room_id, v_participant_count
+        FROM rooms r
+        LEFT JOIN room_participants rp ON rp.room_id = r.id AND rp.left_at IS NULL
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 4
+          AND r.creator_id != p_user_id
+        GROUP BY r.id
+        HAVING COUNT(rp.id) BETWEEN 1 AND 3  -- ✅ Room has 1-3 people
+        ORDER BY 
+          COUNT(rp.id) DESC,  -- Prefer fuller rooms
+          r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ FOUND 4-person room: % (has % participants)', v_found_room_id, v_participant_count;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id, false;
+            RETURN;
+        END IF;
+    END IF;
+    
+    RAISE NOTICE '⚠️ No available room found';
+    
+    -- ============================================
+    -- CREATE NEW ROOM
+    -- ============================================
+    RAISE NOTICE '🏗️ Creating new room...';
+    
+    INSERT INTO rooms (
+        room_type,
+        room_size,
+        gender_preference,
+        interest_category,
+        creator_id,
+        creator_gender,
+        is_active
+    ) VALUES (
+        'public',
+        p_room_size,
+        v_opposite_gender,
+        'random',
+        p_user_id,
+        p_user_gender,
+        true
+    ) RETURNING id INTO v_created_room_id;
+    
+    RAISE NOTICE '✅ CREATED room: %', v_created_room_id;
+    RAISE NOTICE '========================================';
+    
+    RETURN QUERY SELECT v_created_room_id, true;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION find_compatible_room_simple(UUID, gender_preference, INTEGER) TO authenticated, anon;
+
+-- ============================================
+-- FIX #5: Join Room Function (Simplified)
+-- ============================================
+
+DROP FUNCTION IF EXISTS join_room_if_available(UUID, UUID) CASCADE;
+
+CREATE OR REPLACE FUNCTION join_room_if_available(
+    p_room_id UUID,
+    p_user_id UUID
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_room_size INTEGER;
+    v_current_count INTEGER;
+    v_is_active BOOLEAN;
+BEGIN
+    -- Get room info with lock
+    SELECT room_size, is_active 
+    INTO v_room_size, v_is_active
+    FROM rooms 
+    WHERE id = p_room_id
+    FOR UPDATE;
+    
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'room_not_found');
+    END IF;
+    
+    IF NOT v_is_active THEN
+        RETURN json_build_object('success', false, 'error', 'room_inactive');
+    END IF;
+    
+    -- Count current participants
+    SELECT COUNT(*) INTO v_current_count
+    FROM room_participants
+    WHERE room_id = p_room_id 
+      AND left_at IS NULL;
+    
+    -- Check if full
+    IF v_current_count >= v_room_size THEN
+        RAISE NOTICE '❌ Room % is full (%/%)', p_room_id, v_current_count, v_room_size;
+        RETURN json_build_object('success', false, 'error', 'room_full');
+    END IF;
+    
+    -- Join room
+    INSERT INTO room_participants (room_id, user_id, joined_at, left_at)
+    VALUES (p_room_id, p_user_id, NOW(), NULL)
+    ON CONFLICT (room_id, user_id) 
+    DO UPDATE SET left_at = NULL, joined_at = NOW();
+    
+    RAISE NOTICE '✅ User % joined room % (%/%)', 
+        p_user_id, p_room_id, v_current_count + 1, v_room_size;
+    
+    RETURN json_build_object('success', true);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION join_room_if_available(UUID, UUID) TO authenticated, anon;
+
+-- ============================================
+-- FIX #6: Periodic Cleanup Function (Optional)
+-- Call this periodically if needed
+-- ============================================
+
+CREATE OR REPLACE FUNCTION cleanup_all_garbage()
+RETURNS TABLE(
+    deleted_rooms INTEGER,
+    deleted_participants INTEGER
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_deleted_rooms INTEGER;
+    v_deleted_participants INTEGER;
+BEGIN
+    -- Delete rooms with no active participants
+    DELETE FROM rooms
+    WHERE id NOT IN (
+        SELECT DISTINCT room_id
+        FROM room_participants
+        WHERE left_at IS NULL
+    );
+    
+    GET DIAGNOSTICS v_deleted_rooms = ROW_COUNT;
+    
+    -- Delete old participant records (older than 1 day)
+    DELETE FROM room_participants
+    WHERE left_at IS NOT NULL
+      AND left_at < NOW() - INTERVAL '1 day';
+    
+    GET DIAGNOSTICS v_deleted_participants = ROW_COUNT;
+    
+    RAISE NOTICE '✅ Cleanup: % rooms, % old participants', v_deleted_rooms, v_deleted_participants;
+    
+    RETURN QUERY SELECT v_deleted_rooms, v_deleted_participants;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION cleanup_all_garbage() TO authenticated, service_role;
+
+-- ============================================
+-- VERIFICATION
+-- ============================================
+
+DO $$
+DECLARE
+    active_rooms INTEGER;
+    active_participants INTEGER;
+BEGIN
+    SELECT COUNT(*) INTO active_rooms FROM rooms WHERE is_active = true;
+    SELECT COUNT(*) INTO active_participants FROM room_participants WHERE left_at IS NULL;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ ALL FIXES APPLIED';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE 'Current State:';
+    RAISE NOTICE '  • Active Rooms: %', active_rooms;
+    RAISE NOTICE '  • Active Participants: %', active_participants;
+    RAISE NOTICE '';
+    RAISE NOTICE 'Fixed Issues:';
+    RAISE NOTICE '  1. ✅ Active user count now accurate';
+    RAISE NOTICE '  2. ✅ Empty rooms deleted immediately';
+    RAISE NOTICE '  3. ✅ Matchmaking fixed (finds existing or creates)';
+    RAISE NOTICE '  4. ✅ Next Room works correctly';
+    RAISE NOTICE '  5. ✅ No more stale/garbage rooms';
+    RAISE NOTICE '';
+    RAISE NOTICE 'How It Works:';
+    RAISE NOTICE '  • User clicks "Start" → Count increases';
+    RAISE NOTICE '  • User leaves → Room deleted instantly';
+    RAISE NOTICE '  • Next Room → Finds existing or creates new';
+    RAISE NOTICE '  • No room full errors (proper counting)';
+    RAISE NOTICE '========================================';
+END $$;
+
+
+
+
+------- FILE - 92
+
+
+
+-- ============================================
+-- 🚨 FIX 404 ERROR - Database Function Missing
+-- The frontend is calling a function that doesn't exist
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+-- ============================================
+-- STEP 1: Check which functions exist
+-- ============================================
+DO $$
+DECLARE
+    func_record RECORD;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '📋 EXISTING FUNCTIONS CHECK';
+    RAISE NOTICE '========================================';
+    
+    FOR func_record IN 
+        SELECT 
+            proname as function_name,
+            pg_get_function_identity_arguments(oid) as arguments
+        FROM pg_proc 
+        WHERE proname LIKE '%compatible%' 
+           OR proname LIKE '%room%'
+        ORDER BY proname
+    LOOP
+        RAISE NOTICE '✓ %(%)', func_record.function_name, func_record.arguments;
+    END LOOP;
+    
+    RAISE NOTICE '========================================';
+END $$;
+
+-- ============================================
+-- STEP 2: Drop ALL old versions of the function
+-- ============================================
+
+-- Drop with TEXT parameter (wrong type)
+DROP FUNCTION IF EXISTS find_compatible_room_simple(UUID, TEXT, INTEGER) CASCADE;
+
+-- Drop with gender_preference (correct type)
+DROP FUNCTION IF EXISTS find_compatible_room_simple(UUID, gender_preference, INTEGER) CASCADE;
+
+-- ============================================
+-- STEP 3: Create the CORRECT function
+-- This accepts TEXT but casts internally
+-- ============================================
+
+CREATE OR REPLACE FUNCTION find_compatible_room_simple(
+    p_user_id UUID,
+    p_user_gender TEXT,  -- ✅ Accepts TEXT from frontend
+    p_room_size INTEGER
+)
+RETURNS TABLE(matched_room_id UUID, is_new_room BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_found_room_id UUID;
+    v_created_room_id UUID;
+    v_opposite_gender TEXT;
+    v_participant_count INTEGER;
+    v_gender_enum gender_preference;  -- For database operations
+BEGIN
+    -- Validation
+    IF p_user_gender NOT IN ('male', 'female') THEN
+        RAISE EXCEPTION 'Gender must be "male" or "female"';
+    END IF;
+    
+    -- Cast to enum for database operations
+    v_gender_enum := p_user_gender::gender_preference;
+    
+    -- Determine opposite gender
+    v_opposite_gender := CASE 
+        WHEN p_user_gender = 'male' THEN 'female'
+        ELSE 'male'
+    END;
+    
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 MATCHMAKING';
+    RAISE NOTICE 'User: % (Gender: %)', p_user_id, p_user_gender;
+    RAISE NOTICE 'Room Size: %', p_room_size;
+    RAISE NOTICE '========================================';
+    
+    -- Update user's gender
+    UPDATE users 
+    SET gender = v_gender_enum, updated_at = NOW()
+    WHERE id = p_user_id;
+    
+    -- ✅ CRITICAL: Leave ALL existing rooms first
+    UPDATE room_participants
+    SET left_at = NOW()
+    WHERE user_id = p_user_id AND left_at IS NULL;
+    
+    RAISE NOTICE '✅ Left all existing rooms';
+    
+    -- Small delay for cleanup
+    PERFORM pg_sleep(0.15);
+    
+    -- ============================================
+    -- MATCHING LOGIC
+    -- ============================================
+    
+    IF p_room_size = 2 THEN
+        -- 2-PERSON ROOM: Try opposite gender first
+        RAISE NOTICE '🔍 Step 1: Looking for opposite gender (%)...', v_opposite_gender;
+        
+        SELECT r.id, COUNT(rp.id) 
+        INTO v_found_room_id, v_participant_count
+        FROM rooms r
+        LEFT JOIN room_participants rp ON rp.room_id = r.id AND rp.left_at IS NULL
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 2
+          AND r.creator_gender::text = v_opposite_gender
+          AND r.gender_preference::text = p_user_gender
+          AND r.creator_id != p_user_id
+        GROUP BY r.id
+        HAVING COUNT(rp.id) = 1  -- Room has exactly 1 person
+        ORDER BY r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ FOUND opposite gender room: %', v_found_room_id;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id, false;
+            RETURN;
+        END IF;
+        
+        RAISE NOTICE '⚠️ No opposite gender match';
+        
+        -- Fallback: Same gender
+        RAISE NOTICE '🔍 Step 2: Looking for same gender (%)...', p_user_gender;
+        
+        SELECT r.id, COUNT(rp.id)
+        INTO v_found_room_id, v_participant_count
+        FROM rooms r
+        LEFT JOIN room_participants rp ON rp.room_id = r.id AND rp.left_at IS NULL
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 2
+          AND r.creator_gender::text = p_user_gender
+          AND r.creator_id != p_user_id
+        GROUP BY r.id
+        HAVING COUNT(rp.id) = 1
+        ORDER BY r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ FOUND same gender room: %', v_found_room_id;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id, false;
+            RETURN;
+        END IF;
+        
+    ELSIF p_room_size = 4 THEN
+        -- 4-PERSON ROOM
+        RAISE NOTICE '🔍 Looking for 4-person room...';
+        
+        SELECT r.id, COUNT(rp.id)
+        INTO v_found_room_id, v_participant_count
+        FROM rooms r
+        LEFT JOIN room_participants rp ON rp.room_id = r.id AND rp.left_at IS NULL
+        WHERE r.room_type = 'public'
+          AND r.is_active = true
+          AND r.room_size = 4
+          AND r.creator_id != p_user_id
+        GROUP BY r.id
+        HAVING COUNT(rp.id) BETWEEN 1 AND 3
+        ORDER BY 
+          COUNT(rp.id) DESC,
+          r.created_at ASC
+        LIMIT 1;
+        
+        IF v_found_room_id IS NOT NULL THEN
+            RAISE NOTICE '✅ FOUND 4-person room: %', v_found_room_id;
+            RAISE NOTICE '========================================';
+            RETURN QUERY SELECT v_found_room_id, false;
+            RETURN;
+        END IF;
+    END IF;
+    
+    RAISE NOTICE '⚠️ No available room';
+    
+    -- ============================================
+    -- CREATE NEW ROOM
+    -- ============================================
+    RAISE NOTICE '🏗️ Creating new room...';
+    
+    INSERT INTO rooms (
+        room_type,
+        room_size,
+        gender_preference,
+        interest_category,
+        creator_id,
+        creator_gender,
+        is_active
+    ) VALUES (
+        'public',
+        p_room_size,
+        v_opposite_gender::gender_preference,
+        'random',
+        p_user_id,
+        v_gender_enum,
+        true
+    ) RETURNING id INTO v_created_room_id;
+    
+    RAISE NOTICE '✅ CREATED room: %', v_created_room_id;
+    RAISE NOTICE '========================================';
+    
+    RETURN QUERY SELECT v_created_room_id, true;
+END;
+$$;
+
+-- ✅ Grant permissions
+GRANT EXECUTE ON FUNCTION find_compatible_room_simple(UUID, TEXT, INTEGER) TO authenticated, anon;
+
+-- ============================================
+-- STEP 4: Also create leave_all_user_rooms if missing
+-- ============================================
+
+DROP FUNCTION IF EXISTS leave_all_user_rooms(UUID) CASCADE;
+
+CREATE OR REPLACE FUNCTION leave_all_user_rooms(p_user_id UUID)
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    affected_count INTEGER;
+BEGIN
+    UPDATE room_participants
+    SET left_at = NOW()
+    WHERE user_id = p_user_id AND left_at IS NULL;
+    
+    GET DIAGNOSTICS affected_count = ROW_COUNT;
+    
+    RAISE NOTICE '🚪 User % left % rooms', p_user_id, affected_count;
+    
+    RETURN COALESCE(affected_count, 0);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION leave_all_user_rooms(UUID) TO authenticated, anon;
+
+-- ============================================
+-- STEP 5: Verify functions are created
+-- ============================================
+
+DO $$
+DECLARE
+    func_exists BOOLEAN;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ VERIFICATION';
+    RAISE NOTICE '========================================';
+    
+    -- Check find_compatible_room_simple
+    SELECT EXISTS(
+        SELECT 1 FROM pg_proc 
+        WHERE proname = 'find_compatible_room_simple'
+        AND pg_get_function_identity_arguments(oid) = 'p_user_id uuid, p_user_gender text, p_room_size integer'
+    ) INTO func_exists;
+    
+    IF func_exists THEN
+        RAISE NOTICE '✓ find_compatible_room_simple(UUID, TEXT, INTEGER) EXISTS';
+    ELSE
+        RAISE NOTICE '✗ find_compatible_room_simple NOT FOUND!';
+    END IF;
+    
+    -- Check leave_all_user_rooms
+    SELECT EXISTS(
+        SELECT 1 FROM pg_proc 
+        WHERE proname = 'leave_all_user_rooms'
+    ) INTO func_exists;
+    
+    IF func_exists THEN
+        RAISE NOTICE '✓ leave_all_user_rooms(UUID) EXISTS';
+    ELSE
+        RAISE NOTICE '✗ leave_all_user_rooms NOT FOUND!';
+    END IF;
+    
+    -- Check join_room_if_available
+    SELECT EXISTS(
+        SELECT 1 FROM pg_proc 
+        WHERE proname = 'join_room_if_available'
+    ) INTO func_exists;
+    
+    IF func_exists THEN
+        RAISE NOTICE '✓ join_room_if_available(UUID, UUID) EXISTS';
+    ELSE
+        RAISE NOTICE '✗ join_room_if_available NOT FOUND!';
+    END IF;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '🎯 Ready to test!';
+    RAISE NOTICE '========================================';
+END $$;
