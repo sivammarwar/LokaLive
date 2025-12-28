@@ -322,7 +322,7 @@ export default function Login() {
             <div className="space-y-4">
               <div className="inline-block px-4 py-2 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded-full border border-blue-400/30 backdrop-blur-sm">
                 <span className="text-sm font-semibold bg-gradient-to-r from-blue-300 to-purple-300 bg-clip-text text-transparent">
-                  ✨ Better than Omegle
+                  ✨ Better than Others
                 </span>
               </div>
               
@@ -358,13 +358,13 @@ export default function Login() {
             <div className="flex gap-8 pt-4">
               <div>
                 <div className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
-                  100K+
+                 🫵
                 </div>
                 <div className="text-sm text-gray-400">Active Users</div>
               </div>
               <div>
                 <div className="text-3xl font-bold bg-gradient-to-r from-purple-400 to-pink-400 bg-clip-text text-transparent">
-                  4.9/5
+                  coming soon...
                 </div>
                 <div className="text-sm text-gray-400">User Rating</div>
               </div>
