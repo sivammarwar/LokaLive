@@ -51,18 +51,28 @@ export default function Login() {
       return;
     }
 
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      toast.error('Please enter a valid email address.');
+      return;
+    }
+
     setIsLoading(true);
     try {
+      // Use signInWithOtp which sends OTP instead of magic link
       const { error } = await supabase.auth.signInWithOtp({
         email: email.trim(),
         options: {
           shouldCreateUser: true,
+          // This ensures we get OTP email, not magic link
+          emailRedirectTo: undefined,
         },
       });
 
       if (error) throw error;
       
-      toast.success('Check your email! Code expires in 60 seconds.');
+      toast.success('Check your email! 6-digit code expires in 60 seconds.');
       setStep('OTP_VERIFICATION');
     } catch (error: any) {
       console.error('OTP send error:', error);
@@ -74,8 +84,8 @@ export default function Login() {
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!otp.trim() || otp.trim().length !== 8) {
-      toast.error('Please enter the 8-digit code.');
+    if (!otp.trim() || otp.trim().length !== 6) {
+      toast.error('Please enter the complete 6-digit code.');
       return;
     }
     
@@ -98,20 +108,21 @@ export default function Login() {
       setStep('DISPLAY_NAME_INPUT');
     } catch (error: any) {
       console.error('OTP verification error:', error);
-      console.error('Error details:', JSON.stringify(error, null, 2));
       
       let errorMessage = 'Invalid or expired code. Please try again.';
       
       if (error.message) {
-        errorMessage = error.message;
-      }
-      
-      if (error.code === 'PGRST116') {
-        errorMessage = 'Database error: Could not fetch user profile. Please contact support.';
+        if (error.message.includes('expired')) {
+          errorMessage = 'Code expired. Please request a new one.';
+        } else if (error.message.includes('Invalid')) {
+          errorMessage = 'Invalid code. Please check and try again.';
+        } else {
+          errorMessage = error.message;
+        }
       }
       
       toast.error(errorMessage);
-      setStep('EMAIL_INPUT');
+      // Don't reset to EMAIL_INPUT, let user try again with same email
       setOtp('');
     } finally {
       setIsLoading(false);
@@ -143,7 +154,7 @@ export default function Login() {
       const sessionToken = crypto.randomUUID();
       const fingerprint = await generateFingerprint();
 
-      // Fetch user profile from users table with better error handling
+      // Fetch user profile from users table
       const { data: userProfiles, error: profileError } = await supabase
         .from('users')
         .select('id, display_name, email, is_permanently_banned, banned_until, health_tokens, gender')
@@ -151,7 +162,6 @@ export default function Login() {
 
       if (profileError) {
         console.error('Profile fetch error:', profileError);
-        // Don't throw immediately, let's try to create the profile
       }
 
       let userProfile = userProfiles && userProfiles.length > 0 ? userProfiles[0] : null;
@@ -186,7 +196,6 @@ export default function Login() {
 
         if (updateError) {
           console.error('Update error:', updateError);
-          // Continue anyway, don't block login
         }
 
         setUser(
@@ -199,8 +208,8 @@ export default function Login() {
         toast.success(`Welcome back, ${displayName.trim()}!`);
         navigate('/create-room');
       } else {
-        // No user profile exists - create one manually
-        console.log('No profile found, creating new user profile...');
+        // No user profile exists - create one
+        console.log('Creating new user profile...');
         
         const { data: newProfile, error: insertError } = await supabase
           .from('users')
@@ -217,7 +226,7 @@ export default function Login() {
 
         if (insertError) {
           console.error('Insert error:', insertError);
-          // Maybe profile was created between checks, try fetching again
+          // Retry fetch in case of race condition
           await new Promise(resolve => setTimeout(resolve, 500));
           
           const { data: retryProfile } = await supabase
@@ -251,7 +260,6 @@ export default function Login() {
       }
     } catch (error: any) {
       console.error('Login completion error:', error);
-      console.error('Error details:', JSON.stringify(error, null, 2));
       
       let errorMessage = 'Could not complete login. Please try again.';
       
@@ -288,7 +296,7 @@ export default function Login() {
                 disabled={isLoading}
               />
               <p className="text-xs text-muted-foreground">
-                We'll send an 8-digit code to verify your identity.
+                We'll send a 6-digit code to verify your identity.
               </p>
             </div>
 
@@ -319,19 +327,21 @@ export default function Login() {
           <form onSubmit={handleVerifyOtp} className="space-y-4">
             <div className="space-y-2">
               <label htmlFor="otp" className="text-sm font-medium text-foreground">
-                Enter the 8-digit code
+                Enter the 6-digit code
               </label>
               <Input
                 id="otp"
                 type="text"
-                placeholder="00000000"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                placeholder="000000"
                 value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
-                maxLength={8}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                maxLength={6}
                 autoComplete="one-time-code"
                 autoFocus
                 disabled={isLoading}
-                className="text-center text-2xl tracking-widest font-mono"
+                className="text-center text-3xl tracking-[0.5em] font-mono"
               />
               <p className="text-xs text-muted-foreground">
                 Code sent to <strong>{email}</strong>. Expires in 60 seconds.
@@ -355,7 +365,7 @@ export default function Login() {
                 variant="hero"
                 size="xl"
                 className="w-full"
-                disabled={isLoading}
+                disabled={isLoading || otp.length !== 6}
               >
                 {isLoading ? (
                   <div className="flex items-center gap-2">

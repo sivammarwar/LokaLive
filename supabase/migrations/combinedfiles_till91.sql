@@ -10803,3 +10803,302 @@ BEGIN
     RAISE NOTICE '🎯 Ready to test!';
     RAISE NOTICE '========================================';
 END $$;
+
+
+
+
+-------- FILE 92 
+
+
+
+
+-- ============================================
+-- 🧹 COMPLETE DATABASE CLEANUP FOR PRODUCTION
+-- ⚠️ WARNING: This will delete ALL test data
+-- Run this in Supabase SQL Editor
+-- ============================================
+
+-- ============================================
+-- STEP 1: BACKUP CHECK
+-- ============================================
+DO $$
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '⚠️  PRE-CLEANUP STATISTICS';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE 'Users: %', (SELECT COUNT(*) FROM users);
+    RAISE NOTICE 'Rooms: %', (SELECT COUNT(*) FROM rooms);
+    RAISE NOTICE 'Participants: %', (SELECT COUNT(*) FROM room_participants);
+    RAISE NOTICE 'Chess Games: %', (SELECT COUNT(*) FROM chess_games);
+    RAISE NOTICE 'Chess Signaling: %', (SELECT COUNT(*) FROM chess_signaling);
+    RAISE NOTICE 'Signaling: %', (SELECT COUNT(*) FROM signaling);
+    RAISE NOTICE 'Reports: %', (SELECT COUNT(*) FROM reports);
+    RAISE NOTICE 'Diamond Transactions: %', (SELECT COUNT(*) FROM diamond_transactions);
+    RAISE NOTICE 'Withdrawal Methods: %', (SELECT COUNT(*) FROM withdrawal_methods);
+    RAISE NOTICE 'Transactions: %', (SELECT COUNT(*) FROM transactions);
+    RAISE NOTICE 'Ludo Votes: %', (SELECT COUNT(*) FROM ludo_votes);
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '';
+END $$;
+
+-- ============================================
+-- STEP 2: DELETE ALL RELATED DATA (CASCADE ORDER)
+-- ============================================
+
+-- 2.1: Delete Chess Data (depends on users/rooms)
+DELETE FROM chess_signaling;
+DELETE FROM chess_games;
+
+-- 2.2: Delete Room Data (depends on rooms/users)
+DELETE FROM signaling;
+DELETE FROM room_participants;
+DELETE FROM rooms;
+
+-- 2.3: Delete Reports
+DELETE FROM reports;
+
+-- 2.4: Delete Diamond/Transaction Data
+DELETE FROM diamond_transactions;
+DELETE FROM withdrawal_methods;
+DELETE FROM transactions;
+
+-- 2.5: Delete Ludo Votes
+DELETE FROM ludo_votes;
+
+-- 2.6: Delete Users (CRITICAL - This removes all auth users)
+-- ⚠️ This will log out ALL users
+DELETE FROM users;
+
+-- 2.7: Clean up auth.users table (Supabase auth)
+-- ⚠️ This removes authentication records
+DELETE FROM auth.users;
+
+-- ============================================
+-- STEP 3: RESET SEQUENCES (if any)
+-- ============================================
+DO $$
+DECLARE
+    seq_record RECORD;
+BEGIN
+    FOR seq_record IN 
+        SELECT schemaname, sequencename 
+        FROM pg_sequences 
+        WHERE schemaname = 'public'
+    LOOP
+        EXECUTE format('ALTER SEQUENCE %I.%I RESTART WITH 1', 
+            seq_record.schemaname, seq_record.sequencename);
+        RAISE NOTICE '✓ Reset sequence: %.%', seq_record.schemaname, seq_record.sequencename;
+    END LOOP;
+END $$;
+
+-- ============================================
+-- STEP 4: VERIFY CLEANUP
+-- ============================================
+DO $$
+DECLARE
+    total_records INTEGER := 0;
+    table_count INTEGER;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '✅ POST-CLEANUP VERIFICATION';
+    RAISE NOTICE '========================================';
+    
+    -- Check each table
+    SELECT COUNT(*) INTO table_count FROM users;
+    RAISE NOTICE 'Users: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM rooms;
+    RAISE NOTICE 'Rooms: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM room_participants;
+    RAISE NOTICE 'Participants: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM chess_games;
+    RAISE NOTICE 'Chess Games: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM chess_signaling;
+    RAISE NOTICE 'Chess Signaling: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM signaling;
+    RAISE NOTICE 'Signaling: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM reports;
+    RAISE NOTICE 'Reports: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM diamond_transactions;
+    RAISE NOTICE 'Diamond Transactions: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM withdrawal_methods;
+    RAISE NOTICE 'Withdrawal Methods: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM transactions;
+    RAISE NOTICE 'Transactions: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM ludo_votes;
+    RAISE NOTICE 'Ludo Votes: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    SELECT COUNT(*) INTO table_count FROM auth.users;
+    RAISE NOTICE 'Auth Users: % (Expected: 0)', table_count;
+    total_records := total_records + table_count;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE '----------------------------------------';
+    RAISE NOTICE 'TOTAL RECORDS: %', total_records;
+    
+    IF total_records = 0 THEN
+        RAISE NOTICE '✅ DATABASE IS CLEAN!';
+    ELSE
+        RAISE NOTICE '⚠️  WARNING: % records remain', total_records;
+    END IF;
+    
+    RAISE NOTICE '========================================';
+END $$;
+
+-- ============================================
+-- STEP 5: VERIFY ALL FUNCTIONS ARE PRESENT
+-- ============================================
+DO $$
+DECLARE
+    critical_functions TEXT[] := ARRAY[
+        'find_compatible_room_simple',
+        'join_room_if_available',
+        'leave_all_user_rooms',
+        'get_active_users_by_gender',
+        'store_original_room_for_chess',
+        'return_from_chess_to_appropriate_room',
+        'deduct_bet_from_both_players',
+        'process_bet_payout',
+        'refund_bet_to_both_players'
+    ];
+    func_name TEXT;
+    func_exists BOOLEAN;
+    missing_count INTEGER := 0;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 CRITICAL FUNCTIONS CHECK';
+    RAISE NOTICE '========================================';
+    
+    FOREACH func_name IN ARRAY critical_functions LOOP
+        SELECT EXISTS(
+            SELECT 1 FROM pg_proc WHERE proname = func_name
+        ) INTO func_exists;
+        
+        IF func_exists THEN
+            RAISE NOTICE '✓ %', func_name;
+        ELSE
+            RAISE NOTICE '✗ % (MISSING!)', func_name;
+            missing_count := missing_count + 1;
+        END IF;
+    END LOOP;
+    
+    RAISE NOTICE '';
+    IF missing_count = 0 THEN
+        RAISE NOTICE '✅ All critical functions present';
+    ELSE
+        RAISE NOTICE '⚠️  WARNING: % functions missing!', missing_count;
+    END IF;
+    RAISE NOTICE '========================================';
+END $$;
+
+-- ============================================
+-- STEP 6: VERIFY ALL TRIGGERS ARE ACTIVE
+-- ============================================
+DO $$
+DECLARE
+    trigger_record RECORD;
+    trigger_count INTEGER := 0;
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🔍 ACTIVE TRIGGERS CHECK';
+    RAISE NOTICE '========================================';
+    
+    FOR trigger_record IN
+        SELECT 
+            event_object_table as table_name,
+            trigger_name,
+            event_manipulation as event_type
+        FROM information_schema.triggers
+        WHERE trigger_schema = 'public'
+        ORDER BY event_object_table, trigger_name
+    LOOP
+        RAISE NOTICE '✓ %.% (%)', 
+            trigger_record.table_name, 
+            trigger_record.trigger_name,
+            trigger_record.event_type;
+        trigger_count := trigger_count + 1;
+    END LOOP;
+    
+    RAISE NOTICE '';
+    RAISE NOTICE 'Total Triggers: %', trigger_count;
+    RAISE NOTICE '========================================';
+END $$;
+
+-- ============================================
+-- FINAL STATUS REPORT
+-- ============================================
+DO $$
+BEGIN
+    RAISE NOTICE '';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '🎉 DATABASE CLEANUP COMPLETE';
+    RAISE NOTICE '========================================';
+    RAISE NOTICE '';
+    RAISE NOTICE '✅ What was cleaned:';
+    RAISE NOTICE '   • All test users deleted';
+    RAISE NOTICE '   • All rooms removed';
+    RAISE NOTICE '   • All chess games cleared';
+    RAISE NOTICE '   • All transactions deleted';
+    RAISE NOTICE '   • All signaling data removed';
+    RAISE NOTICE '';
+    RAISE NOTICE '✅ What is preserved:';
+    RAISE NOTICE '   • All table structures';
+    RAISE NOTICE '   • All functions';
+    RAISE NOTICE '   • All triggers';
+    RAISE NOTICE '   • All indexes';
+    RAISE NOTICE '   • All RLS policies';
+    RAISE NOTICE '';
+    RAISE NOTICE '🚀 Your app is now ready for production!';
+    RAISE NOTICE '';
+    RAISE NOTICE '📋 Next Steps:';
+    RAISE NOTICE '   1. Run the VACUUM commands below (separate queries)';
+    RAISE NOTICE '   2. Test user registration';
+    RAISE NOTICE '   3. Test matchmaking (2 fresh users)';
+    RAISE NOTICE '   4. Test chess functionality';
+    RAISE NOTICE '   5. Monitor for any issues';
+    RAISE NOTICE '';
+    RAISE NOTICE '⚠️  IMPORTANT: Run VACUUM commands separately:';
+    RAISE NOTICE '   Copy and paste each line below as a separate query';
+    RAISE NOTICE '========================================';
+END $$;
+
+-- ============================================
+-- STEP 7: VACUUM COMMANDS (Run these SEPARATELY)
+-- Copy each line and run as individual queries
+-- ============================================
+
+-- VACUUM ANALYZE users;
+-- VACUUM ANALYZE rooms;
+-- VACUUM ANALYZE room_participants;
+-- VACUUM ANALYZE chess_games;
+-- VACUUM ANALYZE chess_signaling;
+-- VACUUM ANALYZE signaling;
+-- VACUUM ANALYZE reports;
+-- VACUUM ANALYZE diamond_transactions;
+-- VACUUM ANALYZE withdrawal_methods;
+-- VACUUM ANALYZE transactions;
+-- VACUUM ANALYZE ludo_votes;
